@@ -1,0 +1,89 @@
+"""
+应用配置 —— 全部从环境变量读取,通过 python-dotenv 加载 .env
+"""
+import os
+from functools import lru_cache
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Settings:
+    # LLM
+    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://docs.newapi.pro/v1").rstrip("/")
+    LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-3-opus-20240229")
+    LLM_ANTHROPIC_VERSION: str = os.getenv("LLM_ANTHROPIC_VERSION", "2023-06-01")
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    LLM_USAGE_ENABLED: bool = os.getenv("LLM_USAGE_ENABLED", "true").lower() == "true"
+    LLM_DAILY_CALL_LIMIT_PER_USER: int = int(os.getenv("LLM_DAILY_CALL_LIMIT_PER_USER", "100"))
+    LLM_DAILY_TOKEN_LIMIT_PER_USER: int = int(os.getenv("LLM_DAILY_TOKEN_LIMIT_PER_USER", "200000"))
+    LLM_DAILY_COST_LIMIT_USD_PER_USER: float = float(os.getenv("LLM_DAILY_COST_LIMIT_USD_PER_USER", "5"))
+    LLM_INPUT_PRICE_PER_1M_USD: float = float(os.getenv("LLM_INPUT_PRICE_PER_1M_USD", "0"))
+    LLM_OUTPUT_PRICE_PER_1M_USD: float = float(os.getenv("LLM_OUTPUT_PRICE_PER_1M_USD", "0"))
+
+    # App
+    USE_MOCK: bool = os.getenv("USE_MOCK", "false").lower() == "true"
+    CORS_ORIGINS: list = [
+        o.strip() for o in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173"
+        ).split(",") if o.strip()
+    ]
+    PORT: int = int(os.getenv("PORT", "8000"))
+
+    # Auth
+    AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "")
+    AUTH_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("AUTH_TOKEN_EXPIRE_MINUTES", "1440"))
+    SUPER_ADMIN_EMAIL: str = os.getenv("SUPER_ADMIN_EMAIL", "").strip().lower()
+    SUPER_ADMIN_PASSWORD: str = os.getenv("SUPER_ADMIN_PASSWORD", "")
+    SUPER_ADMIN_DISPLAY_NAME: str = os.getenv("SUPER_ADMIN_DISPLAY_NAME", "超级管理员")
+    EMAIL_CODE_EXPIRE_MINUTES: int = int(os.getenv("EMAIL_CODE_EXPIRE_MINUTES", "10"))
+    EMAIL_CODE_COOLDOWN_SECONDS: int = int(os.getenv("EMAIL_CODE_COOLDOWN_SECONDS", "60"))
+    EMAIL_VERIFICATION_DEV_MODE: bool = os.getenv("EMAIL_VERIFICATION_DEV_MODE", "false").lower() == "true"
+
+    # SMTP email sender
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "465"))
+    SMTP_USERNAME: str = os.getenv("SMTP_USERNAME", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "") or SMTP_USERNAME
+    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "识光简历")
+    SMTP_USE_SSL: bool = os.getenv("SMTP_USE_SSL", "true").lower() == "true"
+
+    # 限流:每个 IP 每分钟允许的 /api POST 请求数。0 = 关闭(默认,本地 demo 不受影响)。
+    # 公网部署时设为 >0(如 60),防止 /api/chat 等被刷爆 LLM 费用。
+    RATE_LIMIT_PER_MIN: int = int(os.getenv("RATE_LIMIT_PER_MIN", "30"))
+
+    # Sentry 错误追踪
+    SENTRY_DSN: str = os.getenv("SENTRY_DSN", "")
+    SENTRY_ENVIRONMENT: str = os.getenv("SENTRY_ENVIRONMENT", "production")
+    SENTRY_TRACES_SAMPLE_RATE: float = float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+
+    # 日志级别
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+    # MySQL 数据库连接
+    # 格式: mysql+pymysql://用户名:密码@主机:端口/数据库名?charset=utf8mb4
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        "mysql+pymysql://root:123456@localhost:3306/glint?charset=utf8mb4"
+    )
+
+    @property
+    def llm_available(self) -> bool:
+        """Key 已配置且未启用强制 mock"""
+        return bool(self.LLM_API_KEY) and not self.USE_MOCK
+
+    @property
+    def smtp_available(self) -> bool:
+        return bool(self.SMTP_HOST and self.SMTP_PORT and self.SMTP_FROM)
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
