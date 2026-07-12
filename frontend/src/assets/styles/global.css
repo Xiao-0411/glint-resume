@@ -6,72 +6,73 @@
 }
 
 :root {
-  /* 主色 —— 克制的蓝色系，深邃且有信任感 */
-  --color-primary: #2563EB;
-  --color-primary-dark: #1D4ED8;
-  --color-primary-darker: #1E40AF;
-  --color-primary-light: #93C5FD;
-  --color-primary-lighter: #DBEAFE;
-  --color-primary-soft: #EFF6FF;
-  --color-accent: #0891B2;
-  --color-accent-light: #67E8F9;
-  --color-success: #059669;
+  /* 主色 —— Indigo/Violet 紫蓝渐变，现代专业 */
+  --color-primary: #4F46E5;
+  --color-primary-dark: #4338CA;
+  --color-primary-darker: #3730A3;
+  --color-primary-light: #A5B4FC;
+  --color-primary-lighter: #E0E7FF;
+  --color-primary-soft: #EEF2FF;
+  --color-accent: #7C3AED;
+  --color-accent-light: #C4B5FD;
+  --color-accent-soft: #F5F3FF;
+  --color-success: #10B981;
   --color-success-soft: #D1FAE5;
-  --color-warning: #D97706;
+  --color-warning: #F59E0B;
   --color-warning-soft: #FEF3C7;
-  --color-danger: #DC2626;
+  --color-danger: #EF4444;
   --color-danger-soft: #FEE2E2;
 
-  /* 中性色 —— Notion 风格的温和层次 */
-  --color-bg: #F9FAFB;
-  --color-bg-warm: #FAFAF9;
+  /* 中性色 */
+  --color-bg: #F8FAFC;
+  --color-bg-warm: #FFFBEB;
   --color-bg-card: #FFFFFF;
-  --color-bg-hover: #F3F4F6;
-  --color-bg-subtle: #FAFBFC;
-  --color-bg-dark: #1F2937;
-  --color-text: #111827;
-  --color-text-secondary: #4B5563;
-  --color-text-muted: #9CA3AF;
-  --color-text-faint: #D1D5DB;
-  --color-text-inverse: #F9FAFB;
-  --color-border: #E5E7EB;
-  --color-border-light: #F3F4F6;
-  --color-border-strong: #D1D5DB;
+  --color-bg-hover: #F1F5F9;
+  --color-bg-subtle: #F8FAFC;
+  --color-bg-dark: #0F172A;
+  --color-text: #0F172A;
+  --color-text-secondary: #475569;
+  --color-text-muted: #94A3B8;
+  --color-text-faint: #CBD5E1;
+  --color-text-inverse: #F8FAFC;
+  --color-border: #E2E8F0;
+  --color-border-light: #F1F5F9;
+  --color-border-strong: #CBD5E1;
 
-  /* 渐变 —— 在关键 CTA 与装饰处使用 */
-  --gradient-primary: linear-gradient(135deg, #2563EB 0%, #0891B2 100%);
-  --gradient-primary-soft: linear-gradient(135deg, #EFF6FF 0%, #ECFEFF 100%);
-  --gradient-subtle: linear-gradient(180deg, #F9FAFB 0%, #F3F4F6 100%);
-  --gradient-glow: radial-gradient(circle at 30% 20%, rgba(37, 99, 235, 0.08), transparent 60%);
-  --gradient-card: linear-gradient(180deg, #FFFFFF 0%, #FAFBFC 100%);
+  /* 渐变 */
+  --gradient-primary: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%);
+  --gradient-primary-soft: linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%);
+  --gradient-subtle: linear-gradient(180deg, #F8FAFC 0%, #F1F5F9 100%);
+  --gradient-glow: radial-gradient(circle at 30% 20%, rgba(79, 70, 229, 0.06), transparent 60%);
+  --gradient-card: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%);
 
-  /* 阴影 —— 多层次精细化 */
+  /* 阴影 —— 带色相的柔和阴影 */
   --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06), 0 2px 4px rgba(15, 23, 42, 0.04);
-  --shadow-lg: 0 12px 24px rgba(15, 23, 42, 0.08), 0 4px 8px rgba(15, 23, 42, 0.04);
-  --shadow-xl: 0 20px 40px rgba(15, 23, 42, 0.10), 0 8px 16px rgba(15, 23, 42, 0.06);
-  --shadow-paper: 0 1px 1px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.10);
-  --shadow-primary: 0 4px 14px rgba(37, 99, 235, 0.30);
-  --shadow-primary-strong: 0 10px 28px rgba(37, 99, 235, 0.40);
-  --shadow-focus: 0 0 0 4px rgba(37, 99, 235, 0.12);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.03);
+  --shadow-md: 0 4px 14px rgba(79, 70, 229, 0.06), 0 2px 4px rgba(15, 23, 42, 0.03);
+  --shadow-lg: 0 12px 28px rgba(79, 70, 229, 0.07), 0 4px 8px rgba(15, 23, 42, 0.03);
+  --shadow-xl: 0 20px 48px rgba(15, 23, 42, 0.08), 0 8px 16px rgba(15, 23, 42, 0.04);
+  --shadow-paper: 0 1px 1px rgba(15, 23, 42, 0.03), 0 8px 24px rgba(15, 23, 42, 0.06);
+  --shadow-primary: 0 4px 16px rgba(79, 70, 229, 0.2);
+  --shadow-primary-strong: 0 8px 28px rgba(79, 70, 229, 0.3);
+  --shadow-focus: 0 0 0 4px rgba(79, 70, 229, 0.1);
 
   /* 圆角 */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
   --radius-xl: 20px;
-  --radius-2xl: 28px;
+  --radius-2xl: 24px;
   --radius-pill: 999px;
 
-  /* 缓动函数 —— 精细化交互 */
+  /* 缓动 */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
   /* 字体 */
-  --font-sans: "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+  --font-sans: "Plus Jakarta Sans", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-serif: "SimSun", "Times New Roman", Georgia, serif;
   --font-mono: "JetBrains Mono", "Consolas", "SFMono-Regular", monospace;
 }

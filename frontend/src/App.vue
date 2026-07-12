@@ -25,12 +25,12 @@ import { sessionApi } from '@/api'
 
 const themeOverrides = {
   common: {
-    primaryColor: '#2563EB',
-    primaryColorHover: '#3B82F6',
-    primaryColorPressed: '#1D4ED8',
-    primaryColorSuppl: '#2563EB',
-    borderRadius: '10px',
-    fontFamily: '"PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif'
+    primaryColor: '#4F46E5',
+    primaryColorHover: '#7C3AED',
+    primaryColorPressed: '#4338CA',
+    primaryColorSuppl: '#4F46E5',
+    borderRadius: '12px',
+    fontFamily: '"Plus Jakarta Sans", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif'
   }
 }
 
