@@ -67,7 +67,7 @@
             <span class="score-num" :style="{ color: report.grade_color }">{{ report.total_score }}</span>
             <div class="score-meta">
               <span class="score-label">简历质量分</span>
-              <span class="score-grade" :style="{ color: report.grade_color }">{{ report.grade }} · 距卓越还差 {{ Math.max(0, 90 - report.total_score) }} 分</span>
+              <span class="score-grade" :style="{ color: report.grade_color }">{{ report.grade }}{{ gradeGapText }}</span>
             </div>
           </div>
           <div class="score-mini" v-if="report.dimensions">
@@ -272,6 +272,21 @@ const lastEditedTitle = ref('')
 
 const resume = computed(() => store.resumeData)
 const report = computed(() => store.qualityReport)
+
+// 距下一档还差多少分。阈值与后端 evaluation_service._grade_of 对应,
+// 已是最高档时不再显示"距卓越还差 N 分"。
+const gradeGapText = computed(() => {
+  const score = report.value?.total_score
+  if (typeof score !== 'number') return ''
+  const tiers = [
+    { min: 82, label: '卓越' },
+    { min: 68, label: '优秀' },
+    { min: 52, label: '良好' },
+    { min: 35, label: '合格' },
+  ]
+  const next = [...tiers].reverse().find((t) => score < t.min)
+  return next ? ` · 距${next.label}还差 ${next.min - score} 分` : ''
+})
 
 const topDimensions = computed(() => {
   if (!report.value?.dimensions) return []
@@ -598,9 +613,10 @@ function copyText(text, key) {
 }
 
 function scoreLevel(score) {
-  if (score >= 85) return 'excellent'
-  if (score >= 70) return 'good'
-  if (score >= 60) return 'pass'
+  // 阈值与后端 evaluation_service._grade_of 保持一致
+  if (score >= 82) return 'excellent'
+  if (score >= 68) return 'good'
+  if (score >= 52) return 'pass'
   return 'warn'
 }
 
