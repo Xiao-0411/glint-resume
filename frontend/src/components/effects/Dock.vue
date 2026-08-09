@@ -13,7 +13,7 @@
         <span v-if="hoveredIndex === i" class="dock-label">{{ item.label }}</span>
         <div class="dock-icon">
           <component :is="item.icon" v-if="typeof item.icon !== 'string'" />
-          <span v-else v-html="item.icon"></span>
+          <span v-else>{{ item.icon }}</span>
         </div>
       </div>
     </div>

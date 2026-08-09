@@ -355,6 +355,7 @@ onUnmounted(clearCountdown)
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
   height: 52px;
   padding: 0 16px;
   border: 1.5px solid var(--color-border);
@@ -373,11 +374,20 @@ onUnmounted(clearCountdown)
 }
 .form-input {
   flex: 1;
+  width: 100%;
+  min-width: 0;
   height: 100%;
+  padding: 0;
+  border-radius: 0;
+  outline: none;
   font-size: 1.18rem;
   color: var(--color-text);
   background: transparent;
   font-family: inherit;
+}
+.form-input:focus,
+.form-input:focus-visible {
+  outline: none;
 }
 .form-input::placeholder {
   color: var(--color-text-muted);

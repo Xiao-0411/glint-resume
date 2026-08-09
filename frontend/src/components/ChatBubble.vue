@@ -7,7 +7,13 @@
     </div>
     <div class="bubble-wrap">
       <div class="bubble">
-        <span class="bubble-text" v-html="rendered"></span>
+        <span class="bubble-text">
+          <template v-for="(part, index) in renderedParts" :key="index">
+            <br v-if="part.type === 'break'" />
+            <strong v-else-if="part.type === 'strong'">{{ part.text }}</strong>
+            <template v-else>{{ part.text }}</template>
+          </template>
+        </span>
         <span v-if="typing || streaming" class="cursor"></span>
         <!-- 快捷回复（仅AI最后一条显示） -->
         <div v-if="quickReplies && quickReplies.length" class="quick-chips">
@@ -57,7 +63,7 @@ const emit = defineEmits(['typing-done', 'quick'])
 const displayed = ref('')
 const typing = ref(false)
 
-const rendered = computed(() => simpleMarkdown(displayed.value))
+const renderedParts = computed(() => parseMarkdown(displayed.value))
 
 const formattedTime = computed(() => {
   const d = new Date(props.ts)
@@ -105,19 +111,36 @@ function runTypewriter(fullText) {
   }, speed)
 }
 
-function simpleMarkdown(text) {
-  if (!text) return ''
-  // 1. 先转义所有 HTML 特殊字符
-  let safe = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-  // 2. 在已转义的文本上做 markdown 替换（此时 < > 已经是 &lt; &gt; 了，安全）
-  safe = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-  safe = safe.replace(/\n/g, '<br />')
-  return safe
+function parseMarkdown(text) {
+  if (!text) return []
+  const parts = []
+  const lines = text.split('\n')
+
+  lines.forEach((line, lineIndex) => {
+    // Triple emphasis is rendered as strong; unmatched marker runs are hidden
+    // so partial or malformed model Markdown never leaks into the chat UI.
+    const strongPattern = /\*\*\*([^*]+?)\*\*\*|\*\*([^*]+?)\*\*/g
+    let cursor = 0
+    let match
+
+    while ((match = strongPattern.exec(line)) !== null) {
+      if (match.index > cursor) {
+        pushPlainText(parts, line.slice(cursor, match.index))
+      }
+      parts.push({ type: 'strong', text: match[1] || match[2] })
+      cursor = match.index + match[0].length
+    }
+
+    if (cursor < line.length) pushPlainText(parts, line.slice(cursor))
+    if (lineIndex < lines.length - 1) parts.push({ type: 'break' })
+  })
+
+  return parts
+}
+
+function pushPlainText(parts, text) {
+  const cleaned = text.replace(/\*{2,}/g, '')
+  if (cleaned) parts.push({ type: 'text', text: cleaned })
 }
 </script>
 

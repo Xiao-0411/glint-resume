@@ -4,7 +4,10 @@
  */
 import axios from 'axios'
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://sgjl.cloud'
+const DEFAULT_BASE_URL = import.meta.env.DEV
+  ? 'http://127.0.0.1:8000'
+  : 'https://api.sgjl.cloud'
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_BASE_URL
 
 const http = axios.create({
   baseURL: BASE_URL,
@@ -149,6 +152,7 @@ export async function sendChatStream(payload, handlers = {}) {
     response = await fetch(url, {
       method: 'POST',
       headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+      signal: payload.signal,
       body: JSON.stringify({
         session_id: payload.sessionId,
         target_job: payload.targetJob || '',
@@ -157,6 +161,7 @@ export async function sendChatStream(payload, handlers = {}) {
       })
     })
   } catch (e) {
+    if (e?.name === 'AbortError') throw e
     handlers.onError?.(new Error('无法连接到后端,请确认后端服务已启动'))
     return
   }
@@ -176,6 +181,7 @@ export async function sendChatStream(payload, handlers = {}) {
           stageLabel: evt.data.stage_label,
           quickReplies: evt.data.quick_replies || [],
           fallback: !!evt.data.fallback,
+          fallbackReason: evt.data.fallback_reason || '',
           extracted: evt.data.extracted || null
         })
         return
@@ -185,6 +191,7 @@ export async function sendChatStream(payload, handlers = {}) {
       }
     }
   } catch (e) {
+    if (e?.name === 'AbortError') throw e
     handlers.onError?.(e)
   }
 }
@@ -197,11 +204,13 @@ export async function generateResume(payload) {
   const { data } = await http.post('/api/resume/generate', {
     session_id: payload.sessionId,
     target_job: payload.targetJob || ''
-  }, { timeout: 120000 })
+  }, { timeout: 240000 })
   return {
     resume: data.resume,
     qualityReport: data.quality_report,
-    savedResumeId: data.saved_resume_id || null
+    savedResumeId: data.saved_resume_id || null,
+    fallback: !!data.fallback,
+    fallbackReason: data.fallback_reason || ''
   }
 }
 
@@ -214,7 +223,7 @@ export async function evaluateText(payload) {
     file_name: payload.fileName || 'uploaded.pdf',
     session_id: payload.sessionId,
     target_job: payload.targetJob || ''
-  })
+  }, { timeout: 240000 })
   return {
     resume: data.resume,
     qualityReport: data.quality_report,
@@ -230,7 +239,7 @@ export async function reevaluateResume(payload) {
     resume: payload.resume,
     target_job: payload.targetJob || '',
     session_id: payload.sessionId
-  })
+  }, { timeout: 240000 })
   return {
     qualityReport: data.quality_report,
     savedResumeId: data.saved_resume_id || null
@@ -252,11 +261,7 @@ export async function deleteResume(resumeId) {
  * @param {number|string} resumeId - 简历 ID
  */
 export function downloadResumePdf(resumeId) {
-  const token = getAuthToken()
   const url = `${BASE_URL}/api/resume/pdf?resume_id=${resumeId}`
-  // 用浏览器直接下载，不经过 axios（避免 blob 处理复杂度）
-  const a = document.createElement('a')
-  a.href = url
   // 通过 fetch + blob 方式下载（需要带 Authorization header）
   fetch(url, { headers: withAuthHeaders({}) })
     .then(resp => {

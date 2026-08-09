@@ -9,6 +9,7 @@ from fastapi.responses import Response
 
 from app.core.auth_deps import get_current_user
 from app.core.config import settings
+from app.core.input_sanitizer import sanitize_target_job
 from app.models.db_models import User
 from app.models.schemas import GenerateResumeRequest
 from app.services import llm_service
@@ -28,6 +29,7 @@ async def generate_resume(
     current_user: User = Depends(get_current_user),
 ):
     user_id = current_user.id
+    req.target_job = sanitize_target_job(req.target_job)
     session_store.get_or_create(req.session_id, req.target_job, user_id)
 
     def save_result(resume, quality_report, source="chat"):
@@ -67,25 +69,23 @@ async def generate_resume(
             source="resume_generate",
         ):
             resume = await generate_resume_from_session(req.session_id, req.target_job)
-            # 若 LLM 抽取失败,resume 可能是空壳,直接兜底
+            # 没有经历就没有可写的简历。此时绝不能返回示例内容:
+            # 用户会拿到一份姓名和项目都不属于自己的简历,却标着"基于真实经历重塑"。
+            # 宁可明确告知需要继续补充,也不伪造。
             if not resume.get("experiences"):
-                logger.warning("resume_empty_experiences_fallback", extra={
+                logger.warning("resume_empty_experiences_reject", extra={
                     "session_id": req.session_id,
                     "user_id": user_id,
                 })
-                resume = mock_resume(req.target_job)
-                quality_report = mock_quality_report()
-                resume_id = save_result(resume, quality_report, source="mock")
-                return {
-                    "resume": resume,
-                    "quality_report": quality_report,
-                    "saved_resume_id": resume_id,
-                    "fallback": True,
-                    "fallback_reason": "AI 未能提取到足够的经历信息，展示的是示例内容",
-                }
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="还没聊到你的具体经历，无法生成简历。请回到对话继续描述你的项目、实习或活动经历。",
+                )
             quality_report = await evaluate_resume(resume, req.target_job)
         resume_id = save_result(resume, quality_report)
         return {"resume": resume, "quality_report": quality_report, "saved_resume_id": resume_id}
+    except HTTPException:
+        raise
     except llm_service.LLMQuotaExceeded as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
     except Exception:

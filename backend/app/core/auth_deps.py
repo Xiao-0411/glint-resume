@@ -43,6 +43,11 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账号已被禁用",
         )
+    # 从 session 中分离:简历生成等接口会在返回前等待数分钟的 LLM 调用,
+    # 期间这条连接一直闲置,超过 MySQL wait_timeout 就会被掐断。
+    # 分离后读取 user.id 等属性不再触发 DB 访问,避免请求末尾报
+    # "MySQL server has gone away"。
+    db.expunge(user)
     return user
 
 
@@ -62,6 +67,7 @@ def get_optional_current_user(
     user = db.query(User).filter(User.id == payload["sub"]).first()
     if user is None or not user.is_active:
         return None
+    db.expunge(user)
     return user
 
 

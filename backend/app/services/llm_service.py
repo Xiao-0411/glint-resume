@@ -5,11 +5,14 @@ LLM 服务封装 —— 兼容 Anthropic Messages API 风格的代理端点
 from contextlib import contextmanager
 from contextvars import ContextVar
 import json
+import logging
 from typing import AsyncGenerator, List, Dict, Optional
 import httpx
 
 from app.core.config import settings
 from app.services import llm_usage_service
+
+logger = logging.getLogger("glint.llm")
 
 
 class LLMError(Exception):
@@ -60,10 +63,11 @@ def _build_payload(
     system: Optional[str] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
-    stream: bool = False
+    stream: bool = False,
+    model: Optional[str] = None,
 ) -> Dict:
     payload = {
-        "model": settings.LLM_MODEL,
+        "model": model or settings.LLM_MODEL,
         "max_tokens": max_tokens or settings.LLM_MAX_TOKENS,
         "temperature": temperature if temperature is not None else settings.LLM_TEMPERATURE,
         "messages": messages,
@@ -74,46 +78,75 @@ def _build_payload(
     return payload
 
 
+def _is_retryable_status(status_code: int) -> bool:
+    """5xx 与 429 多为网关瞬时故障（如 524 网关超时），重试有意义；
+    4xx 其余为请求本身问题，重试只会重复失败。"""
+    return status_code == 429 or status_code >= 500
+
+
+def _is_retryable_request_error(exc: httpx.RequestError) -> bool:
+    """读超时说明模型本身就慢，重试只会把等待时间翻倍并冲破前端超时；
+    连接类错误失败得快，重试划算。"""
+    return not isinstance(exc, httpx.ReadTimeout)
+
+
 async def chat_complete(
     messages: List[Dict[str, str]],
     system: Optional[str] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
-    timeout: float = 60.0
+    timeout: Optional[float] = None,
+    model: Optional[str] = None,
 ) -> str:
     """
     一次性获取完整回复
     messages 格式: [{"role": "user"|"assistant", "content": "..."}]
+    网关瞬时故障(5xx/429/网络错误)会自动重试 LLM_MAX_RETRIES 次。
     """
     if not settings.LLM_API_KEY:
         raise LLMError("LLM_API_KEY 未配置")
 
     url = f"{settings.LLM_BASE_URL}/messages"
-    payload = _build_payload(messages, system, max_tokens, temperature, stream=False)
+    payload = _build_payload(messages, system, max_tokens, temperature, stream=False, model=model)
     estimated_prompt_tokens = _enforce_usage_quota(messages, system, payload)
+    request_timeout = timeout if timeout is not None else settings.LLM_TIMEOUT_SECONDS
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.post(url, headers=_build_headers(), json=payload)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            _record_usage(
-                payload=payload,
-                prompt_tokens=estimated_prompt_tokens,
-                completion_tokens=0,
-                status="error",
-                error_message=f"HTTP {e.response.status_code}: {e.response.text[:200]}",
-            )
-            raise LLMError(f"LLM HTTP {e.response.status_code}: {e.response.text[:200]}")
-        except httpx.RequestError as e:
-            _record_usage(
-                payload=payload,
-                prompt_tokens=estimated_prompt_tokens,
-                completion_tokens=0,
-                status="error",
-                error_message=f"网络错误: {e}",
-            )
-            raise LLMError(f"LLM 网络错误: {e}")
+    last_error = ""
+    resp = None
+    for attempt in range(settings.LLM_MAX_RETRIES + 1):
+        is_last = attempt == settings.LLM_MAX_RETRIES
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            try:
+                resp = await client.post(url, headers=_build_headers(), json=payload)
+                resp.raise_for_status()
+                break
+            except httpx.HTTPStatusError as e:
+                last_error = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+                if is_last or not _is_retryable_status(e.response.status_code):
+                    _record_usage(
+                        payload=payload,
+                        prompt_tokens=estimated_prompt_tokens,
+                        completion_tokens=0,
+                        status="error",
+                        error_message=last_error,
+                    )
+                    raise LLMError(f"LLM {last_error}")
+            except httpx.RequestError as e:
+                last_error = f"网络错误: {e}"
+                if is_last or not _is_retryable_request_error(e):
+                    _record_usage(
+                        payload=payload,
+                        prompt_tokens=estimated_prompt_tokens,
+                        completion_tokens=0,
+                        status="error",
+                        error_message=last_error,
+                    )
+                    raise LLMError(f"LLM {last_error}")
+        logger.warning("llm_retry", extra={
+            "attempt": attempt + 1,
+            "model": payload.get("model", ""),
+            "error": last_error,
+        })
 
     data = resp.json()
     content_blocks = data.get("content", [])
@@ -136,7 +169,8 @@ async def chat_stream(
     system: Optional[str] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
-    timeout: float = 120.0
+    timeout: Optional[float] = None,
+    model: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     流式获取回复, yield 每个文本增量片段(纯文本 delta)
@@ -148,93 +182,109 @@ async def chat_stream(
       - message_delta
       - message_stop
       - ping
+
+    仅在「尚未吐出任何文本」时重试:已经流给用户的内容不能重来,
+    否则用户会看到重复的半截回复。
     """
     if not settings.LLM_API_KEY:
         raise LLMError("LLM_API_KEY 未配置")
 
     url = f"{settings.LLM_BASE_URL}/messages"
-    payload = _build_payload(messages, system, max_tokens, temperature, stream=True)
+    payload = _build_payload(messages, system, max_tokens, temperature, stream=True, model=model)
     estimated_prompt_tokens = _enforce_usage_quota(messages, system, payload)
+    request_timeout = timeout if timeout is not None else settings.LLM_TIMEOUT_SECONDS
     prompt_tokens = estimated_prompt_tokens
     completion_tokens = 0
     text_parts: List[str] = []
     completed = False
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            async with client.stream(
-                "POST", url, headers=_build_headers(), json=payload
-            ) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    body_text = body.decode("utf-8", "ignore")[:200]
-                    _record_usage(
-                        payload=payload,
-                        prompt_tokens=estimated_prompt_tokens,
-                        completion_tokens=0,
-                        status="error",
-                        error_message=f"HTTP {resp.status_code}: {body_text}",
-                    )
-                    raise LLMError(
-                        f"LLM HTTP {resp.status_code}: {body_text}"
-                    )
-
-                event_name = None
-                async for raw_line in resp.aiter_lines():
-                    if not raw_line:
-                        continue
-                    line = raw_line.strip()
-                    if line.startswith("event:"):
-                        event_name = line[6:].strip()
-                        continue
-                    if line.startswith("data:"):
-                        data_str = line[5:].strip()
-                        if not data_str or data_str == "[DONE]":
-                            continue
-                        try:
-                            data = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
-                        usage = _extract_usage(data)
-                        if usage.get("prompt_tokens"):
-                            prompt_tokens = usage["prompt_tokens"]
-                        if usage.get("completion_tokens"):
-                            completion_tokens = usage["completion_tokens"]
-                        # 文本增量
-                        if data.get("type") == "content_block_delta":
-                            delta = data.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                text = delta.get("text", "")
-                                if text:
-                                    text_parts.append(text)
-                                    yield text
-                        # 错误事件
-                        elif data.get("type") == "error":
-                            err = data.get("error", {})
-                            message = (
-                                f"LLM 流式错误: {err.get('type', 'unknown')} "
-                                f"- {err.get('message', '')}"
-                            )
+    for attempt in range(settings.LLM_MAX_RETRIES + 1):
+        is_last = attempt == settings.LLM_MAX_RETRIES
+        retryable_error = None
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            try:
+                async with client.stream(
+                    "POST", url, headers=_build_headers(), json=payload
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        body_text = body.decode("utf-8", "ignore")[:200]
+                        message = f"HTTP {resp.status_code}: {body_text}"
+                        if not is_last and _is_retryable_status(resp.status_code):
+                            retryable_error = message
+                        else:
                             _record_usage(
                                 payload=payload,
-                                prompt_tokens=prompt_tokens,
-                                completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens("".join(text_parts)),
+                                prompt_tokens=estimated_prompt_tokens,
+                                completion_tokens=0,
                                 status="error",
                                 error_message=message,
                             )
-                            raise LLMError(
-                                message
-                            )
-                completed = True
-        except httpx.RequestError as e:
-            _record_usage(
-                payload=payload,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens("".join(text_parts)),
-                status="error",
-                error_message=f"网络错误: {e}",
-            )
-            raise LLMError(f"LLM 网络错误: {e}")
+                            raise LLMError(f"LLM {message}")
+
+                    if retryable_error is None:
+                        async for raw_line in resp.aiter_lines():
+                            if not raw_line:
+                                continue
+                            line = raw_line.strip()
+                            if line.startswith("data:"):
+                                data_str = line[5:].strip()
+                                if not data_str or data_str == "[DONE]":
+                                    continue
+                                try:
+                                    data = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    continue
+                                usage = _extract_usage(data)
+                                if usage.get("prompt_tokens"):
+                                    prompt_tokens = usage["prompt_tokens"]
+                                if usage.get("completion_tokens"):
+                                    completion_tokens = usage["completion_tokens"]
+                                # 文本增量
+                                if data.get("type") == "content_block_delta":
+                                    delta = data.get("delta", {})
+                                    if delta.get("type") == "text_delta":
+                                        text = delta.get("text", "")
+                                        if text:
+                                            text_parts.append(text)
+                                            yield text
+                                # 错误事件
+                                elif data.get("type") == "error":
+                                    err = data.get("error", {})
+                                    message = (
+                                        f"LLM 流式错误: {err.get('type', 'unknown')} "
+                                        f"- {err.get('message', '')}"
+                                    )
+                                    _record_usage(
+                                        payload=payload,
+                                        prompt_tokens=prompt_tokens,
+                                        completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens("".join(text_parts)),
+                                        status="error",
+                                        error_message=message,
+                                    )
+                                    raise LLMError(message)
+                        completed = True
+            except httpx.RequestError as e:
+                message = f"网络错误: {e}"
+                # 已经吐字了就不能重来,直接报错让上层兜底
+                if is_last or text_parts or not _is_retryable_request_error(e):
+                    _record_usage(
+                        payload=payload,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens("".join(text_parts)),
+                        status="error",
+                        error_message=message,
+                    )
+                    raise LLMError(f"LLM {message}")
+                retryable_error = message
+
+        if completed:
+            break
+        logger.warning("llm_stream_retry", extra={
+            "attempt": attempt + 1,
+            "model": payload.get("model", ""),
+            "error": retryable_error or "",
+        })
 
     if completed:
         _record_usage(

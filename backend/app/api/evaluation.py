@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.auth_deps import get_current_user
 from app.core.config import settings
+from app.core.input_sanitizer import sanitize_target_job
 from app.models.db_models import User
 from app.models.schemas import EvaluateTextRequest, EvaluateResumeRequest
 from app.services import llm_service
@@ -27,6 +28,7 @@ async def evaluate_text(
     current_user: User = Depends(get_current_user),
 ):
     user_id = current_user.id
+    req.target_job = sanitize_target_job(req.target_job)
     if req.session_id:
         session_store.get_or_create(req.session_id, req.target_job, user_id)
 
@@ -104,6 +106,7 @@ async def evaluate_resume_endpoint(
     """直接对传入的简历对象做五维评分(保留其 exp_id),用于用户编辑后的重评。
     不重新生成简历,因此 evidence/target_exp_id 始终与当前简历对齐。"""
     user_id = current_user.id
+    req.target_job = sanitize_target_job(req.target_job)
     if req.session_id:
         session_store.get_or_create(req.session_id, req.target_job, user_id)
 

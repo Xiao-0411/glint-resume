@@ -1,24 +1,6 @@
 <template>
   <div class="home">
-    <ClickSpark spark-color="#4F46E5" :spark-count="8" :spark-radius="25" :duration="500">
-    <PixelBlast
-      fixed
-      class="home-pixel-blast"
-      variant="circle"
-      :pixel-size="3"
-      color="#6D28D9"
-      :pattern-scale="2.5"
-      :pattern-density="1.28"
-      :pixel-size-jitter="0.3"
-      :ripple-intensity="1.2"
-      :ripple-thickness="0.12"
-      :ripple-speed="0.28"
-      :speed="0.38"
-      :edge-fade="0.04"
-      :frame-rate="24"
-      :resolution-scale="0.62"
-      :mobile-resolution-scale="0.5"
-    />
+    <div class="home-pattern" aria-hidden="true"></div>
     <!-- ====== 1. Hero ====== -->
     <section class="hero">
       <div class="container">
@@ -59,7 +41,7 @@
         </div>
 
         <div class="hero-paths">
-          <div class="hero-path purple" @click="focusInput">
+          <button class="hero-path purple" type="button" @click="focusInput">
             <div class="hp-icon">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
@@ -73,8 +55,8 @@
             <svg class="hp-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
             </svg>
-          </div>
-          <div class="hero-path white" @click="goUpload">
+          </button>
+          <button class="hero-path white" type="button" @click="goUpload">
             <div class="hp-icon">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
@@ -87,7 +69,7 @@
             <svg class="hp-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
             </svg>
-          </div>
+          </button>
         </div>
 
         <div class="hero-stats">
@@ -116,19 +98,28 @@
           <h2 class="section-title">比传统方式<span class="text-gradient">快 5 倍</span></h2>
         </div>
         <div class="steps-grid">
-          <div class="step-card" v-for="(step, i) in steps" :key="i">
-            <div class="step-media">
-              <div class="step-media-placeholder">
-                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
-                </svg>
-                <span>{{ step.imgHint }}</span>
+          <article class="step-card" v-for="step in steps" :key="step.title">
+            <div class="step-visual" :class="`step-visual--${step.icon}`" aria-hidden="true">
+              <div class="visual-toolbar"><i></i><i></i><i></i></div>
+              <div v-if="step.icon === 'target'" class="target-preview">
+                <span class="preview-label">目标岗位</span>
+                <strong>产品经理</strong>
+                <div class="preview-tags"><span>用户洞察</span><span>数据分析</span></div>
+              </div>
+              <div v-else-if="step.icon === 'message'" class="message-preview">
+                <span class="message-ai">你最有成就感的项目是什么？</span>
+                <span class="message-user">校园二手平台，从 0 做到 2,000 用户</span>
+              </div>
+              <div v-else class="resume-preview">
+                <div class="resume-avatar"></div>
+                <div class="resume-lines"><strong></strong><span></span><span></span></div>
+                <div class="resume-score">92</div>
               </div>
             </div>
-            <div class="step-num">{{ i + 1 }}</div>
+            <div class="step-num">{{ step.eyebrow }}</div>
             <h4>{{ step.title }}</h4>
             <p>{{ step.desc }}</p>
-          </div>
+          </article>
         </div>
       </div>
     </section>
@@ -140,9 +131,9 @@
           <h2 class="section-title">不只是工具，更是<span class="text-gradient">求职伙伴</span></h2>
         </div>
         <div class="features-grid">
-          <SpotlightCard class="feat-card" :class="'feat-card-' + (i + 1)" v-for="(feat, i) in features" :key="i">
+          <SpotlightCard class="feat-card" :class="{ 'feat-card-featured': feat.featured }" v-for="feat in features" :key="feat.title">
             <div class="feat-icon-wrap">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" v-html="feat.iconPath"></svg>
+              <HomeIcon :name="feat.icon" />
             </div>
             <h4>{{ feat.title }}</h4>
             <p>{{ feat.desc }}</p>
@@ -160,11 +151,11 @@
         <div class="compare-row">
           <div class="compare-side">
             <span class="compare-label">优化前</span>
-            <div class="compare-placeholder">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
-              </svg>
-              <span>📸 优化前简历截图<br/>600×800px</span>
+            <div class="compare-paper compare-paper--before" aria-label="优化前简历示意">
+              <div class="paper-heading"><strong>产品实习生</strong><span>简历</span></div>
+              <div class="paper-section"><b>项目经历</b><p>负责需求沟通和原型设计，完成产品功能。</p></div>
+              <div class="paper-section"><b>校园经历</b><p>参与社团活动，协助完成日常运营工作。</p></div>
+              <div class="paper-note"><span>问题</span> 描述宽泛，缺少结果与岗位关键词</div>
             </div>
           </div>
           <div class="compare-vs">
@@ -174,11 +165,11 @@
           </div>
           <div class="compare-side">
             <span class="compare-label highlight">优化后</span>
-            <div class="compare-placeholder highlight">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-              </svg>
-              <span>📸 优化后简历截图<br/>600×800px</span>
+            <div class="compare-paper compare-paper--after" aria-label="优化后简历示意">
+              <div class="paper-heading"><strong>产品经理</strong><span>匹配度 92%</span></div>
+              <div class="paper-section"><b>校园二手交易平台</b><p>主导 18 场用户访谈，重构发布流程，上线 6 周新增 2,000 名用户。</p></div>
+              <div class="paper-section"><b>社团运营项目</b><p>设计分层触达策略，活动到场率从 43% 提升至 71%。</p></div>
+              <div class="paper-note"><span>提升</span> 结果量化，能力与岗位要求直接对齐</div>
             </div>
           </div>
         </div>
@@ -226,20 +217,19 @@
         </div>
       </div>
     </footer>
-    </ClickSpark>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, computed } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
 import { extractJobName } from '@/utils/jobMatcher'
-import PixelBlast from '@/components/effects/PixelBlast.vue'
+import HomeIcon from '@/components/home/HomeIcon.vue'
 import SpotlightCard from '@/components/effects/SpotlightCard.vue'
 import ShinyText from '@/components/effects/ShinyText.vue'
-import ClickSpark from '@/components/effects/ClickSpark.vue'
+import { quickJobs, steps, features } from '@/content/home'
 
 const router = useRouter()
 const store = useChatStore()
@@ -247,41 +237,41 @@ const auth = useAuthStore()
 
 const jobInput = ref('')
 const inputRef = ref(null)
-const quickJobs = ['产品经理', 'Java 后端', '前端开发', '数据分析', 'UI 设计']
-
-const steps = [
-  { title: '输入目标岗位', desc: '告诉 AI 你的目标职位，系统自动匹配岗位核心能力模型', imgHint: '📸 输入岗位的界面截图\n800×500px' },
-  { title: 'AI 智能对话', desc: '像聊天一样，AI 引导你挖掘校园经历和实习项目', imgHint: '📸 AI 对话界面截图\n800×500px' },
-  { title: '一键导出简历', desc: '自动排版生成专业 PDF，附带五维质量评分报告', imgHint: '📸 简历导出界面截图\n800×500px' }
-]
-
-const features = [
-  { title: 'STAR-L 法则驱动', desc: '基于 HR 最认可的情境-任务-行动-结果-学习框架，让每段经历都直击面试官关注点', iconPath: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>' },
-  { title: '五维质量评估', desc: '从完整性、匹配度、量化度、专业性、可读性五个维度精准诊断，给你明确的改进方向', iconPath: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>' },
-  { title: '诚信可追溯', desc: 'AI 辅助包装而非虚构，所有描述基于你的真实经历，拒绝简历造假，求职更安心', iconPath: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>' },
-  { title: '求职全流程', desc: '智能匹配职位、一键投递、看板追踪进度，从简历到 Offer 的全流程支持', iconPath: '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>' }
-]
-
 const stat1 = ref(0)
 const stat2 = ref(0)
 const stat3 = ref(0)
 const stat1Display = computed(() => stat1.value.toLocaleString('en-US'))
 
+const animationIds = new Set()
+
 function animateNum(refVar, target, duration = 1600, isFloat = false) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    refVar.value = target
+    return
+  }
   const start = performance.now()
   const tick = (now) => {
     const t = Math.min(1, (now - start) / duration)
     const eased = 1 - Math.pow(1 - t, 3)
     refVar.value = isFloat ? +(target * eased).toFixed(1) : Math.round(target * eased)
-    if (t < 1) requestAnimationFrame(tick)
+    if (t < 1) {
+      const animationId = requestAnimationFrame(tick)
+      animationIds.add(animationId)
+    }
   }
-  requestAnimationFrame(tick)
+  const animationId = requestAnimationFrame(tick)
+  animationIds.add(animationId)
 }
 
 onMounted(() => {
   animateNum(stat1, 3200)
   animateNum(stat2, 4.9, 1600, true)
   animateNum(stat3, 85)
+})
+
+onUnmounted(() => {
+  animationIds.forEach(cancelAnimationFrame)
+  animationIds.clear()
 })
 
 function quickSelect(job) {
@@ -326,12 +316,19 @@ function goUpload() {
   z-index: 1;
 }
 
-.home-pixel-blast {
+.home-pattern {
+  position: absolute;
+  inset: 0 0 auto;
   z-index: 0;
-  opacity: 0.46;
-  background:
-    radial-gradient(circle at 15% 20%, rgba(79, 70, 229, 0.16), transparent 30%),
-    radial-gradient(circle at 85% 60%, rgba(124, 58, 237, 0.11), transparent 32%);
+  height: min(760px, 100vh);
+  opacity: 0.7;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle, rgba(79, 70, 229, 0.2) 1px, transparent 1.2px),
+    linear-gradient(180deg, rgba(238, 242, 255, 0.72), rgba(248, 250, 252, 0));
+  background-size: 18px 18px, 100% 100%;
+  mask-image: linear-gradient(to bottom, #000 20%, transparent 94%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 20%, transparent 94%);
 }
 
 .container {
@@ -378,7 +375,7 @@ function goUpload() {
 /* ==================== 1. Hero ==================== */
 .hero {
   position: relative;
-  padding: 6rem 0 5rem;
+  padding: 4rem 0 1.5rem;
   text-align: center;
   overflow: hidden;
   isolation: isolate;
@@ -544,6 +541,8 @@ function goUpload() {
   gap: 14px;
   padding: 16px 20px;
   border-radius: 16px;
+  border: none;
+  font-family: inherit;
   cursor: pointer;
   transition: all 0.3s;
 }
@@ -682,7 +681,7 @@ function goUpload() {
 
 /* ==================== 2. 三步流程 ==================== */
 .steps {
-  padding: 6rem 0;
+  padding: 1.5rem 0 6rem;
   background: rgba(255, 255, 255, 0.78);
 }
 
@@ -693,41 +692,157 @@ function goUpload() {
 }
 
 .step-card {
-  text-align: center;
+  text-align: left;
 }
 
-.step-media {
-  margin-bottom: 1.5rem;
-}
-
-.step-media-placeholder {
+.step-visual {
+  position: relative;
   aspect-ratio: 16/10;
+  margin-bottom: 1.4rem;
+  overflow: hidden;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  background: #FFFFFF;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+  transition: transform 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out);
+}
+
+.step-card:hover .step-visual {
+  transform: translateY(-4px);
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.12);
+}
+
+.visual-toolbar {
+  display: flex;
+  gap: 5px;
+  height: 28px;
+  padding: 10px 12px;
+  background: #F8FAFC;
+  border-bottom: 1px solid #E2E8F0;
+}
+
+.visual-toolbar i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #CBD5E1;
+}
+
+.target-preview,
+.message-preview,
+.resume-preview {
+  height: calc(100% - 28px);
+  padding: 20px;
+}
+
+.target-preview {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: linear-gradient(135deg, #FFFFFF, #F0FDFA);
+}
+
+.preview-label {
+  color: #64748B;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.target-preview strong {
+  color: #0F172A;
+  font-size: 1.35rem;
+}
+
+.preview-tags {
+  display: flex;
+  gap: 6px;
+}
+
+.preview-tags span {
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: #0F766E;
+  background: #CCFBF1;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.message-preview {
+  display: flex;
+  flex-direction: column;
   justify-content: center;
   gap: 10px;
   background: #F8FAFC;
-  border: 2px dashed #E2E8F0;
-  border-radius: 16px;
-  color: #CBD5E1;
-  font-size: 0.8rem;
-  text-align: center;
-  line-height: 1.5;
-  white-space: pre-line;
-  transition: all 0.3s;
 }
 
-.step-card:hover .step-media-placeholder {
-  border-color: #C7D2FE;
-  background: rgba(79, 70, 229, 0.02);
+.message-preview span {
+  max-width: 86%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.message-ai {
+  color: #334155;
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+}
+
+.message-user {
+  align-self: flex-end;
+  color: #FFFFFF;
+  background: #4F46E5;
+}
+
+.resume-preview {
+  display: grid;
+  grid-template-columns: 34px 1fr 46px;
+  align-items: start;
+  gap: 12px;
+  background: linear-gradient(150deg, #FFFFFF 0%, #F8FAFC 100%);
+}
+
+.resume-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  background: #0F172A;
+}
+
+.resume-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.resume-lines strong,
+.resume-lines span {
+  display: block;
+  height: 5px;
+  border-radius: 3px;
+  background: #CBD5E1;
+}
+
+.resume-lines strong { width: 64%; height: 8px; background: #475569; }
+.resume-lines span:last-child { width: 78%; }
+
+.resume-score {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 4px solid #34D399;
+  border-radius: 50%;
+  color: #047857;
+  font-weight: 800;
 }
 
 .step-num {
-  font-size: 0.85rem;
+  font-size: 0.78rem;
   font-weight: 800;
-  color: #4F46E5;
-  letter-spacing: 1px;
+  color: #0F766E;
   margin-bottom: 0.5rem;
 }
 
@@ -742,8 +857,7 @@ function goUpload() {
   font-size: 0.95rem;
   color: #64748B;
   line-height: 1.6;
-  max-width: 280px;
-  margin: 0 auto;
+  max-width: 300px;
 }
 
 /* ==================== 3. 核心优势 ==================== */
@@ -773,14 +887,14 @@ function goUpload() {
   border-color: #E0E7FF;
 }
 
-.feat-card-1 {
+.feat-card-featured {
   background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%);
   color: #fff;
   border: none;
   box-shadow: 0 4px 20px rgba(79, 70, 229, 0.2);
 }
 
-.feat-card-1:hover {
+.feat-card-featured:hover {
   box-shadow: 0 8px 32px rgba(79, 70, 229, 0.3);
 }
 
@@ -796,11 +910,16 @@ function goUpload() {
   transition: transform 0.3s;
 }
 
+.feat-icon-wrap svg {
+  width: 24px;
+  height: 24px;
+}
+
 .feat-card:hover .feat-icon-wrap {
   transform: scale(1.1);
 }
 
-.feat-card-1 .feat-icon-wrap {
+.feat-card-featured .feat-icon-wrap {
   background: rgba(255,255,255,0.2);
   color: #fff;
 }
@@ -818,11 +937,11 @@ function goUpload() {
   line-height: 1.65;
 }
 
-.feat-card.feat-card-1 h4 {
+.feat-card.feat-card-featured h4 {
   color: #FFFFFF;
 }
 
-.feat-card.feat-card-1 p {
+.feat-card.feat-card-featured p {
   color: rgba(255, 255, 255, 0.84);
 }
 
@@ -859,25 +978,89 @@ function goUpload() {
   color: #10B981;
 }
 
-.compare-placeholder {
+.compare-paper {
   aspect-ratio: 3/4;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  border-radius: 20px;
-  background: #F8FAFC;
-  border: 2px dashed #E2E8F0;
-  color: #CBD5E1;
-  font-size: 0.85rem;
-  text-align: center;
-  line-height: 1.5;
+  padding: 34px 30px;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  background: #FFFFFF;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.09);
+  color: #334155;
+  text-align: left;
 }
 
-.compare-placeholder.highlight {
-  border-color: rgba(16, 185, 129, 0.2);
-  background: rgba(16, 185, 129, 0.03);
+.compare-paper--after {
+  border-color: rgba(16, 185, 129, 0.4);
+  box-shadow: 0 16px 36px rgba(16, 185, 129, 0.12);
+}
+
+.paper-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 18px;
+  border-bottom: 2px solid #0F172A;
+}
+
+.paper-heading strong {
+  color: #0F172A;
+  font-size: 1.05rem;
+}
+
+.paper-heading span {
+  color: #64748B;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.compare-paper--after .paper-heading span {
+  padding: 4px 7px;
+  border-radius: 4px;
+  color: #047857;
+  background: #D1FAE5;
+}
+
+.paper-section {
+  padding: 18px 0;
+  border-bottom: 1px solid #E2E8F0;
+}
+
+.paper-section b {
+  display: block;
+  margin-bottom: 8px;
+  color: #334155;
+  font-size: 0.78rem;
+}
+
+.paper-section p {
+  color: #64748B;
+  font-size: 0.72rem;
+  line-height: 1.7;
+}
+
+.paper-note {
+  margin-top: 18px;
+  padding: 10px;
+  border-radius: 6px;
+  color: #64748B;
+  background: #F8FAFC;
+  font-size: 0.68rem;
+  line-height: 1.6;
+}
+
+.paper-note span {
+  margin-right: 4px;
+  color: #B45309;
+  font-weight: 800;
+}
+
+.compare-paper--after .paper-note {
+  color: #065F46;
+  background: #ECFDF5;
+}
+
+.compare-paper--after .paper-note span {
+  color: #047857;
 }
 
 .compare-vs {
@@ -1037,20 +1220,20 @@ function goUpload() {
   .compare-row { flex-direction: column; }
   .compare-vs { transform: rotate(90deg); }
   .compare-side { max-width: 100%; width: 100%; }
-  .compare-placeholder { aspect-ratio: 16/10; }
+  .compare-paper { aspect-ratio: auto; min-height: 330px; }
   .footer-grid { grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 768px) {
-  .hero { padding: 4rem 0 3rem; }
+  .hero { padding: 3rem 0 1.5rem; }
   .hero-title { font-size: 2.4rem; letter-spacing: -1px; }
   .hero-desc { font-size: 1.05rem; }
   .hero-input-wrap { flex-direction: column; padding: 10px; gap: 8px; }
   .hero-input { width: 100%; text-align: center; }
   .hero-btn { width: 100%; justify-content: center; }
-  .hero-stats { flex-wrap: wrap; gap: 0; }
-  .hstat { padding: 0 20px; }
-  .hstat-divider { height: 32px; }
+  .hero-path { min-height: 70px; padding: 12px 16px; }
+  .hero-path .hp-text span:last-child { display: none; }
+  .hero-stats { display: none; }
   .section-title { font-size: 1.8rem; }
   .cta-banner h2 { font-size: 1.8rem; }
   .footer-grid { grid-template-columns: 1fr; gap: 24px; }

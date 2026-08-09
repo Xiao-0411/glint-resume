@@ -43,6 +43,18 @@ async def generate_resume_from_session(session_id: str, target_job: str = "") ->
             "awards": extracted.get("awards", []),
             "self_evaluation": extracted.get("self_evaluation", "")
         }
+        # 增量提取只在 AI 做 recap 时触发,用户在 AI 追问细节的中途点"生成"时
+        # experiences 会是空的。此时改用完整对话历史再提取一次,
+        # 避免明明聊过经历却拿到示例简历。
+        if not profile["experiences"]:
+            logger.info("generate_resume_reextract_for_experiences")
+            recovered = await extract_profile(session_id)
+            if recovered.get("experiences"):
+                profile["experiences"] = recovered["experiences"]
+                # 对话里聊到但增量提取漏掉的字段一并补齐
+                for key in ("fullname", "phone", "email", "location", "education", "skills", "awards"):
+                    if not profile.get(key) and recovered.get(key):
+                        profile[key] = recovered[key]
     else:
         # 兜底:用完整对话历史提取
         logger.info("generate_resume_fallback_extract")

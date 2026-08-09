@@ -142,3 +142,26 @@ class Application(Base):
     created_at = Column(DateTime, default=_now)
 
     user = relationship("User")
+
+
+class Job(Base):
+    """职位数据 - 爬虫抓取的真实职位"""
+    __tablename__ = "jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True, comment="平台: zhipin/zhaopin/liepin")
+    platform_job_id = Column(String(128), nullable=False, index=True, comment="平台原始职位ID")
+    title = Column(String(256), nullable=False, comment="职位名称")
+    company = Column(String(256), nullable=False, comment="公司名称")
+    salary = Column(String(64), default="", comment="薪资范围")
+    location = Column(String(128), default="", comment="工作地点")
+    experience = Column(String(64), default="", comment="经验要求")
+    education = Column(String(64), default="", comment="学历要求")
+    tags = Column(JSON, default=list, comment="标签")
+    description = Column(Text, default="", comment="职位描述")
+    requirements = Column(JSON, default=list, comment="职位要求（技能列表）")
+    url = Column(String(512), default="", comment="原始链接")
+    is_active = Column(Boolean, default=True, index=True, comment="是否有效")
+    crawled_at = Column(DateTime, default=_now, comment="抓取时间")
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)

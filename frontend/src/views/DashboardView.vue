@@ -10,7 +10,17 @@
           :class="['tab-btn', { active: activeTab === tab.key }]"
           @click="activeTab = tab.key"
         >
-          <span class="tab-icon" v-html="tab.icon"></span>
+          <span class="tab-icon" aria-hidden="true">
+            <svg v-if="tab.key === 'search'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <svg v-else-if="tab.key === 'tracker'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+            </svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+            </svg>
+          </span>
           <span class="tab-label">{{ tab.label }}</span>
           <span v-if="tab.badge" class="tab-badge">{{ tab.badge }}</span>
         </button>
@@ -870,9 +880,9 @@ async function loadApplications() {
 }
 
 const tabs = computed(() => [
-  { key: 'search', label: '职位搜索', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>', badge: huntStore.matchedJobs.length || null },
-  { key: 'tracker', label: '投递看板', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>', badge: huntStore.applications.length || null },
-  { key: 'analytics', label: '质量归因', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>' }
+  { key: 'search', label: '职位搜索', badge: huntStore.matchedJobs.length || null },
+  { key: 'tracker', label: '投递看板', badge: huntStore.applications.length || null },
+  { key: 'analytics', label: '质量归因' }
 ])
 
 const toast = reactive({ visible: false, message: '', type: 'success' })

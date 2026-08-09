@@ -24,7 +24,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.core.auth_deps import get_current_user
 from app.core.config import settings
-from app.core.input_sanitizer import sanitize_user_input
+from app.core.input_sanitizer import sanitize_target_job, sanitize_user_input
 from app.models.db_models import User
 from app.models.schemas import ChatRequest
 from app.services import dialog_service, llm_service
@@ -65,6 +65,7 @@ async def chat(
         )
     # 使用清洗后的输入
     req.user_message = sanitized
+    req.target_job = sanitize_target_job(req.target_job)
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         # ==== 走 mock 兜底 ====

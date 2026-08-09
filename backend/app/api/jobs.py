@@ -5,25 +5,24 @@ POST /api/jobs/apply  ——  一键投递（持久化到 MySQL）
 GET  /api/jobs/applications  ——  获取投递列表（从 DB 读取）
 POST /api/jobs/applications/status  ——  更新投递状态（持久化）
 
-注:求职加速为 demo 演示模块,职位数据来自 mock(无真实职位数据源),
-与 LLM 是否可用无关。投递记录已持久化到 applications 表。
+职位数据优先从爬虫库（jobs 表）读取，库为空时 fallback 到 mock 数据。
 """
 import datetime
-import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.auth_deps import get_current_user
 from app.core.database import get_db
-from app.models.db_models import Application, User
+from app.models.db_models import Application, Job, User
 from app.models.schemas import (
     JobSearchRequest, JobAdaptRequest, JobApplyRequest, ApplicationStatusRequest
 )
 from app.mock.fallback import (
     mock_job_search, mock_adapt_resume, mock_apply_job,
-    mock_get_applications, mock_update_application_status
+    KW_MAP,
 )
 
 router = APIRouter()
@@ -38,10 +37,119 @@ STATUS_LABEL_MAP = {
 }
 
 
+def _db_job_search(keyword: str = "", db: DBSession = None, limit: int = 60) -> list:
+    """从 MySQL jobs 表搜索职位"""
+    if db is None:
+        return []
+
+    query = db.query(Job).filter(Job.is_active == True)
+
+    if keyword:
+        kw = f"%{keyword}%"
+        query = query.filter(
+            or_(
+                Job.title.like(kw),
+                Job.company.like(kw),
+                Job.location.like(kw),
+                Job.description.like(kw),
+            )
+        )
+
+    rows = query.order_by(Job.crawled_at.desc(), Job.id.desc()).limit(limit).all()
+
+    results = []
+    for row in rows:
+        results.append({
+            "id": f"job_db_{row.id}",
+            "title": row.title,
+            "company": row.company,
+            "salary": row.salary or "薪资面议",
+            "location": row.location or "全国",
+            "tags": row.tags or [],
+            "description": row.description or "",
+            "requirements": row.requirements or [],
+        })
+    return results
+
+
+def _calc_match(target_job: str, job: dict) -> dict:
+    """计算岗位匹配度"""
+    t = (target_job or "").lower()
+    keywords = []
+    for k, v in KW_MAP.items():
+        if k.lower() in t:
+            keywords = v
+            break
+    if not keywords:
+        keywords = job["requirements"][:4] if job["requirements"] else []
+
+    requirements = job.get("requirements", [])
+    if not requirements:
+        return {"score": 50, "matched_keywords": [], "level": "yellow", "missing": [], "reasons": "匹配度未知"}
+
+    match_count = 0
+    matched = []
+    for req in requirements:
+        for kw in keywords:
+            if kw.lower() in req.lower() or req.lower() in kw.lower():
+                match_count += 1
+                matched.append(kw)
+                break
+
+    score = round((match_count / len(requirements)) * 100) if requirements else 50
+
+    if score >= 85:
+        level, reasons = "green", f"岗位要求「{'、'.join(matched[:3])}」与你的技能高度匹配"
+        missing = []
+    elif score >= 60:
+        missing = [r for r in requirements if not any(
+            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
+        reasons = f"匹配度中等，建议微调简历突出「{'、'.join(matched)}」等技能"
+        missing = missing[:2]
+        level = "yellow"
+    else:
+        missing = [r for r in requirements if not any(
+            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
+        reasons = f"核心技能「{'、'.join(missing[:3])}」暂不匹配，建议先补足再投递"
+        missing = missing[:3]
+        level = "red"
+
+    return {
+        "score": score,
+        "matched_keywords": matched,
+        "level": level,
+        "missing": missing,
+        "reasons": reasons,
+    }
+
+
 @router.post("/jobs/search")
-async def job_search(req: JobSearchRequest, current_user: User = Depends(get_current_user)):
-    """搜索职位并进行匹配分级。输出: { jobs: [...], total: int }"""
-    return mock_job_search(keyword=req.keyword, target_job=req.target_job)
+async def job_search(req: JobSearchRequest, current_user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    """搜索职位并进行匹配分级。优先从爬虫库读取，库空时回退 mock。"""
+    keyword = req.keyword or req.target_job or ""
+
+    # 优先从数据库读取
+    db_jobs = _db_job_search(keyword=keyword, db=db)
+
+    if db_jobs:
+        # 用真实数据做匹配分级
+        matched = []
+        for job in db_jobs:
+            m = _calc_match(req.target_job or keyword, job)
+            matched.append({
+                **job,
+                "matchScore": m["score"],
+                "matchLevel": m["level"],
+                "reasons": m["reasons"],
+                "missingSkills": m["missing"],
+            })
+        matched.sort(key=lambda x: x["matchScore"], reverse=True)
+        return {"jobs": matched, "total": len(matched), "source": "db"}
+
+    # 数据库为空，回退 mock
+    result = mock_job_search(keyword=keyword, target_job=req.target_job)
+    result["source"] = "mock"
+    return result
 
 
 @router.post("/jobs/adapt")
@@ -57,8 +165,26 @@ async def apply_job(
     db: DBSession = Depends(get_db),
 ):
     """一键投递 —— 持久化到 applications 表。"""
-    # 从 mock 数据中查找职位信息
-    mock_result = mock_apply_job(job_id=req.job_id, resume_version=req.resume_version)
+    # 尝试从 DB 查找职位信息
+    job_title = ""
+    company = ""
+    if req.job_id.startswith("job_db_"):
+        try:
+            db_job_id = int(req.job_id.replace("job_db_", ""))
+        except ValueError:
+            db_job_id = None
+        if db_job_id is not None:
+            job_row = db.query(Job).filter(Job.id == db_job_id).first()
+            if job_row:
+                job_title = job_row.title
+                company = job_row.company
+
+    if not job_title:
+        # fallback mock
+        mock_result = mock_apply_job(job_id=req.job_id, resume_version=req.resume_version)
+        job_title = mock_result.get("jobTitle", "")
+        company = mock_result.get("company", "")
+
     now = datetime.datetime.now(datetime.timezone.utc)
     app_id = f"app_{uuid.uuid4().hex[:12]}"
 
@@ -66,8 +192,8 @@ async def apply_job(
         id=app_id,
         user_id=current_user.id,
         job_id=req.job_id,
-        job_title=mock_result.get("jobTitle", ""),
-        company=mock_result.get("company", ""),
+        job_title=job_title or "未知职位",
+        company=company or "未知公司",
         resume_version=req.resume_version or "original",
         status="applied",
         status_label="已投递",
@@ -103,6 +229,11 @@ async def get_applications(
         .order_by(Application.applied_at.desc(), Application.id.desc())
         .all()
     )
+
+    if not rows:
+        return {"applications": [], "stats": {
+            "total": 0, "screened": 0, "interviewing": 0, "offered": 0, "rejected": 0,
+        }}
 
     applications = []
     for row in rows:

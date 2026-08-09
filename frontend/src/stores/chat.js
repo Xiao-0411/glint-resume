@@ -154,15 +154,19 @@ export const useChatStore = defineStore('chat', () => {
   function hydrate(snap) {
     if (!snap || typeof snap !== 'object') return
     setSessionId(snap.sessionId || snap.session_id || '')
-    if (typeof snap.targetJob === 'string') targetJob.value = snap.targetJob
+    if (typeof snap.targetJob === 'string') setTargetJob(snap.targetJob)
     if (snap.currentStage) currentStage.value = snap.currentStage
     if (Array.isArray(snap.messages)) {
       // 去掉残留的流式标记，避免恢复出"正在输入"的气泡
       messages.value = snap.messages.map(m => ({ ...m, streaming: false }))
     }
+    if (snap.userProfile && typeof snap.userProfile === 'object') {
+      userProfile.value = { ...userProfile.value, ...snap.userProfile }
+    }
     if (snap.resumeData) resumeData.value = snap.resumeData
     if (snap.qualityReport) qualityReport.value = snap.qualityReport
     if (snap.extractedProfile) extractedProfile.value = snap.extractedProfile
+    currentResumeId.value = snap.currentResumeId ?? snap.current_resume_id ?? null
     resumeDirty.value = false
     reEvaluating.value = false
   }

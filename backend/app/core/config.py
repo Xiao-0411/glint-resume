@@ -12,10 +12,18 @@ class Settings:
     # LLM
     LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://docs.newapi.pro/v1").rstrip("/")
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-3-opus-20240229")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-v4-pro")
+    # 实时对话用的快模型：牺牲一点质量换首字节延迟，对话体验优先
+    LLM_MODEL_FAST: str = os.getenv("LLM_MODEL_FAST", "deepseek-v4-flash")
     LLM_ANTHROPIC_VERSION: str = os.getenv("LLM_ANTHROPIC_VERSION", "2023-06-01")
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    # 单次请求超时：pro 实测单次 70~115s（网关较慢），给到 180s 避免正常请求被误杀；
+    # 前端 240s 超时，留出兜底与响应回传的余量。
+    LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
+    LLM_TIMEOUT_FAST_SECONDS: float = float(os.getenv("LLM_TIMEOUT_FAST_SECONDS", "45"))
+    # 网关偶发 5xx/超时，重试一次即可救回大部分请求
+    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
     LLM_USAGE_ENABLED: bool = os.getenv("LLM_USAGE_ENABLED", "true").lower() == "true"
     LLM_DAILY_CALL_LIMIT_PER_USER: int = int(os.getenv("LLM_DAILY_CALL_LIMIT_PER_USER", "100"))
     LLM_DAILY_TOKEN_LIMIT_PER_USER: int = int(os.getenv("LLM_DAILY_TOKEN_LIMIT_PER_USER", "200000"))

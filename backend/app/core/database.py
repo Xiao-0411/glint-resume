@@ -15,6 +15,10 @@ engine = create_engine(
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,
+    # 简历生成要串行等多次 LLM 调用（实测可达 4 分钟），期间连接一直闲置。
+    # pool_pre_ping 只在取连接时校验，救不了"持有期间被 MySQL 掐断"，
+    # 所以按小于 MySQL wait_timeout 的周期主动回收。
+    pool_recycle=280,
     echo=False,
     future=True
 )
@@ -32,7 +36,13 @@ def get_db():
     try:
         yield db
     finally:
-        db.close()
+        # 简历生成等接口会在依赖持有连接期间等待数分钟的 LLM 调用,
+        # 期间连接闲置超过 MySQL wait_timeout 就已被服务端关闭。
+        # 此时 close() 自身会抛 OperationalError,把一个已经成功的响应变成 500。
+        try:
+            db.close()
+        except Exception:
+            logger.warning("db_close_failed_after_idle", exc_info=True)
 
 
 def init_db():

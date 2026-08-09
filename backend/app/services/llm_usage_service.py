@@ -223,6 +223,8 @@ def model_prices(model: str) -> Tuple[float, float]:
         return 3.0, 15.0
     if "haiku" in name:
         return 0.25, 1.25
+    if "deepseek" in name:
+        return 0.28, 0.42
     if "gpt-4o-mini" in name:
         return 0.15, 0.60
     if "gpt-4o" in name:

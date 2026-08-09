@@ -51,9 +51,11 @@ export const chatApi = {
       const text = resp.reply
       const chunkSize = 4
       for (let i = 0; i < text.length; i += chunkSize) {
+        payload.signal?.throwIfAborted()
         handlers.onDelta?.(text.slice(i, i + chunkSize))
         await new Promise(r => setTimeout(r, 25))
       }
+      payload.signal?.throwIfAborted()
       handlers.onDone?.({
         stage: resp.stage,
         stageLabel: resp.stageLabel,
@@ -61,6 +63,7 @@ export const chatApi = {
         fallback: false
       })
     } catch (e) {
+      if (e?.name === 'AbortError') throw e
       handlers.onError?.(e)
     }
   }

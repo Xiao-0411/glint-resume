@@ -111,14 +111,14 @@
       :visible="generating"
       title="正在生成你的简历"
       subtitle="分析经历，重塑专业描述..."
-      :duration="2000"
+      :duration="45000"
       @done="onGenerated"
     />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
@@ -138,6 +138,7 @@ const aiThinking = ref(false)
 const generating = ref(false)
 const needLogin = ref(false)
 const currentQuickReplies = ref([])
+let streamController = null
 
 const steps = [
   { key: 'basic_info', label: '基本信息' },
@@ -187,9 +188,12 @@ onMounted(async () => {
     router.replace('/')
     return
   }
-  const firstMsg = `我想做${store.targetJob}`
-  await sendUserMessage(firstMsg, true)
+  if (store.messages.length === 0) {
+    await sendUserMessage(`我想做${store.targetJob}`)
+  }
 })
+
+onUnmounted(() => streamController?.abort())
 
 function onSend() {
   if (!canSend.value) return
@@ -203,7 +207,7 @@ function onQuickReply(text) {
   sendUserMessage(text)
 }
 
-async function sendUserMessage(text, isFirst = false) {
+async function sendUserMessage(text) {
   if (aiThinking.value || generating.value) return
 
   store.pushMessage('user', text)
@@ -215,56 +219,65 @@ async function sendUserMessage(text, isFirst = false) {
 
   let aiIdx = -1
   let firstChunkArrived = false
+  streamController?.abort()
+  streamController = new AbortController()
 
-  await chatApi.sendStream(
-    {
-      sessionId: store.sessionId,
-      targetJob: store.targetJob,
-      userMessage: text,
-      userMsgCount: store.userMessageCount
-    },
-    {
-      onDelta: (chunk) => {
-        if (!firstChunkArrived) {
-          firstChunkArrived = true
-          aiThinking.value = false
-          aiIdx = store.pushMessage('ai', '', { streaming: true })
-        }
-        store.appendToMessage(aiIdx, chunk)
-        scrollToBottom()
+  try {
+    await chatApi.sendStream(
+      {
+        sessionId: store.sessionId,
+        targetJob: store.targetJob,
+        userMessage: text,
+        userMsgCount: store.userMessageCount,
+        signal: streamController.signal
       },
-      onDone: (meta) => {
-        store.setStage(meta.stage)
-        if (meta.extracted) store.setExtracted(meta.extracted)
-        currentQuickReplies.value = meta.quickReplies || []
+      {
+        onDelta: (chunk) => {
+          if (!firstChunkArrived) {
+            firstChunkArrived = true
+            aiThinking.value = false
+            aiIdx = store.pushMessage('ai', '', { streaming: true })
+          }
+          store.appendToMessage(aiIdx, chunk)
+          scrollToBottom()
+        },
+        onDone: (meta) => {
+          store.setStage(meta.stage)
+          if (meta.extracted) store.setExtracted(meta.extracted)
+          currentQuickReplies.value = meta.quickReplies || []
 
-        if (aiIdx === -1) {
+          if (aiIdx === -1) {
+            aiThinking.value = false
+            aiIdx = store.pushMessage('ai', '(空回复)', { streaming: false })
+          } else {
+            store.finishStreamingMessage(aiIdx, { quickReplies: meta.quickReplies || [] })
+          }
+
+          // fallback 提示：LLM 不可用时明确告知用户
+          if (meta.fallback) {
+            const reason = meta.fallbackReason || '当前 AI 服务繁忙，展示的是示例内容'
+            store.pushMessage('ai', `⚠️ ${reason}`, { isFallbackNotice: true })
+          }
+
+          if (meta.stage === 'ready_to_generate') {
+            triggerGenerate()
+          }
+        },
+        onError: (err) => {
           aiThinking.value = false
-          aiIdx = store.pushMessage('ai', '(空回复)', { streaming: false })
-        } else {
-          store.finishStreamingMessage(aiIdx, { quickReplies: meta.quickReplies || [] })
-        }
-
-        // fallback 提示：LLM 不可用时明确告知用户
-        if (meta.fallback) {
-          const reason = meta.fallback_reason || '当前 AI 服务繁忙，展示的是示例内容'
-          store.pushMessage('ai', `⚠️ ${reason}`, { isFallbackNotice: true })
-        }
-
-        if (meta.stage === 'ready_to_generate') {
-          triggerGenerate()
-        }
-      },
-      onError: (err) => {
-        aiThinking.value = false
-        if (aiIdx === -1) {
-          store.pushMessage('ai', `抱歉，出了点问题：${err.message || '请稍后重试'}`)
-        } else {
-          store.finishStreamingMessage(aiIdx)
+          if (aiIdx === -1) {
+            store.pushMessage('ai', `抱歉，出了点问题：${err.message || '请稍后重试'}`)
+          } else {
+            store.finishStreamingMessage(aiIdx)
+          }
         }
       }
-    }
-  )
+    )
+  } catch (error) {
+    if (error?.name !== 'AbortError') throw error
+  } finally {
+    streamController = null
+  }
   await scrollToBottom()
 }
 
@@ -299,7 +312,7 @@ async function doGenerate() {
 
     // fallback 提示：简历生成使用了 mock 数据时告知用户
     if (result.fallback) {
-      const reason = result.fallback_reason || '当前 AI 服务繁忙，展示的是示例内容'
+      const reason = result.fallbackReason || '当前 AI 服务繁忙，展示的是示例内容'
       store.pushMessage('ai', `⚠️ ${reason}`, { isFallbackNotice: true })
     }
 
@@ -307,7 +320,15 @@ async function doGenerate() {
     router.push('/result')
   } catch (e) {
     generating.value = false
-    store.pushMessage('ai', '生成简历时出了点问题，请稍后重试。')
+    // 422 = 经历不足，后端明确拒绝生成。把原因告诉用户并留在对话里继续补充，
+    // 不要笼统报"出了点问题"，否则用户不知道该做什么。
+    const status = e?.response?.status
+    const detail = e?.response?.data?.detail
+    if (status === 422 && detail) {
+      store.pushMessage('ai', detail)
+    } else {
+      store.pushMessage('ai', '生成简历时出了点问题，请稍后重试。')
+    }
   }
 }
 
@@ -532,7 +553,7 @@ watch(() => store.messages.length, scrollToBottom)
 .main-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(560px, 1.15fr);
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 620px);
   min-height: 0;
   position: relative;
   z-index: 1;
@@ -734,6 +755,11 @@ watch(() => store.messages.length, scrollToBottom)
   letter-spacing: -0.1px;
 }
 
+.textarea:focus,
+.textarea:focus-visible {
+  outline: none;
+}
+
 .textarea::placeholder {
   color: var(--color-text-muted);
   font-weight: 400;
@@ -814,7 +840,7 @@ watch(() => store.messages.length, scrollToBottom)
     margin: 0 8px;
   }
   .main-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(440px, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 40vw);
   }
 }
 

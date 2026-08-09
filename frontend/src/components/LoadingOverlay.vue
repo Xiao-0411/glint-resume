@@ -55,7 +55,12 @@ function run() {
   const start = Date.now()
   const tick = () => {
     const elapsed = Date.now() - start
-    progress.value = Math.min(100, (elapsed / props.duration) * 100)
+    // 逼近而非填满：真实耗时不可预测（LLM 40~180s），
+    // 进度条走到 95% 后放慢，避免"满格后仍在等"的假完成感。
+    const raw = (elapsed / props.duration) * 100
+    progress.value = raw < 95
+      ? raw
+      : Math.min(99, 95 + (raw - 95) * 0.05)
     if (elapsed < props.duration) {
       rafId = requestAnimationFrame(tick)
     } else {

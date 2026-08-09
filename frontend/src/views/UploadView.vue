@@ -134,7 +134,7 @@
       :visible="evaluating"
       title="AI 正在评估你的简历"
       subtitle="深度分析五维质量指标..."
-      :duration="2200"
+      :duration="45000"
       @done="onEvaluated"
     />
   </div>
@@ -236,7 +236,7 @@ async function doEvaluate() {
     })
     const targetJob = resume?.basic?.target_job || store.targetJob || fileInfo.value.name || '上传简历'
     store.setTargetJob(targetJob)
-    store.setResume(resume, qualityReport)
+    store.setResume(resume, qualityReport, savedResumeId)
     auth.addResumeToHistory({
       savedResumeId,
       sessionId: store.sessionId,
@@ -248,16 +248,16 @@ async function doEvaluate() {
       resume,
       qualityReport
     })
+    // 数据到手才跳转,不能依赖进度条动画结束(真实耗时远超动画时长)
+    evaluating.value = false
+    router.push('/result')
   } catch (e) {
     evaluating.value = false
     errMsg.value = '评估失败，请重试'
   }
 }
 
-function onEvaluated() {
-  evaluating.value = false
-  router.push('/result')
-}
+function onEvaluated() {}
 
 function goHome() {
   router.push('/')
