@@ -1,6 +1,7 @@
 """
 应用配置 —— 全部从环境变量读取,通过 python-dotenv 加载 .env
 """
+import logging
 import os
 from functools import lru_cache
 from dotenv import load_dotenv
@@ -89,9 +90,47 @@ class Settings:
         return bool(self.SMTP_HOST and self.SMTP_PORT and self.SMTP_FROM)
 
 
+# 本地开发用的固定密钥。仅在 CORS 只允许 localhost 时启用,
+# 一旦配置了公网域名就必须显式提供 AUTH_SECRET_KEY。
+_DEV_FALLBACK_SECRET = "glint-local-dev-only-do-not-use-in-production"
+
+
+def _validate_auth_secret(cfg: "Settings") -> None:
+    """
+    AUTH_SECRET_KEY 为空时,HMAC 会用空字节串照常签出 token —— 不报错,
+    但任何人都能伪造。这属于"静默失效"的安全问题,必须启动时拦住。
+
+    判定是否为生产:CORS 里出现了非 localhost 的来源。
+    """
+    if cfg.AUTH_SECRET_KEY:
+        return
+
+    is_public = any(
+        origin.strip()
+        and "localhost" not in origin
+        and "127.0.0.1" not in origin
+        for origin in cfg.CORS_ORIGINS
+    )
+    if is_public:
+        raise RuntimeError(
+            "AUTH_SECRET_KEY 未配置,但 CORS_ORIGINS 含公网域名。\n"
+            "空密钥会让 JWT 可被任意伪造(登录形同虚设)。\n"
+            "请在 backend/.env 中设置一个长随机字符串,例如:\n"
+            "  python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+        )
+    # 纯本地开发:用固定的开发密钥,并警告
+    cfg.AUTH_SECRET_KEY = _DEV_FALLBACK_SECRET
+    logging.getLogger("glint").warning(
+        "auth_secret_key_missing_using_dev_fallback",
+        extra={"hint": "仅本地开发可用;部署前务必配置 AUTH_SECRET_KEY"},
+    )
+
+
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    cfg = Settings()
+    _validate_auth_secret(cfg)
+    return cfg
 
 
 settings = get_settings()

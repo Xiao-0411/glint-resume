@@ -1,0 +1,33 @@
+# ===== 环境变量与密钥 =====
+# 后端/前端各自的 .gitignore 也有覆盖,这里再兜一层,
+# 避免在仓库根目录执行 git add . 时误提交。
+.env
+.env.*
+!.env.example
+!.env.production
+
+# ===== 运行时产物 =====
+logs/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ===== Node / 前端构建 =====
+node_modules/
+dist/
+
+# ===== 编辑器与系统 =====
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# ===== 工具目录 =====
+.claude/worktrees/
