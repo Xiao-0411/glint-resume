@@ -1,6 +1,10 @@
 """
 质量评估服务 —— 五维评分(规则 + LLM 混合)
 五个维度:完整度、量化度、专业度、匹配度、可信度
+
+评分哲学:零分锚定 + 证据累积。空白简历应当接近 0 分而非"合格",
+分数要能真实拉开差距,否则用户看不出改稿前后的区别。
+细粒度规则见 app/services/scoring_rules.py。
 """
 import json
 import re
@@ -9,85 +13,132 @@ from typing import Dict, List, Tuple
 from app.core.prompts import QUALITY_LLM_PROMPT
 from app.services import llm_service
 from app.services.dialog_service import _strip_code_fence
+from app.services.scoring_rules import (
+    QUANT_WITH_UNIT,
+    VERB_STRONG,
+    VERB_NEUTRAL,
+    VAGUE_WORDS,
+    collect_bullets,
+    score_bullet_credibility,
+    score_bullet_professional,
+    score_bullet_quant,
+    tokenize_job,
+)
 
-
-# ====== 量化词正则:能识别数字/百分比/年份等 ======
-QUANT_PATTERN = re.compile(r"(\d+\.?\d*)\s*(%|万|千|百|个|条|人|次|篇|位|倍|分|名|s|ms|秒|分钟|小时|天|周|月|年|MB|GB|TB)?")
-
-# ====== 专业动词词库(粗略) ======
-PRO_VERBS = {
-    "主导", "设计", "构建", "实现", "搭建", "优化", "分析", "推动", "复盘",
-    "协调", "整合", "重构", "落地", "调研", "评估", "迭代", "提升", "降低",
-    "支撑", "驱动", "孵化", "运营", "策划"
+# 加权总分 —— 量化度和专业度是简历质量的主要区分点,完整度只是及格线。
+DIMENSION_WEIGHTS = {
+    "完整度": 0.15,
+    "量化度": 0.30,
+    "专业度": 0.25,
+    "匹配度": 0.20,
+    "可信度": 0.10,
 }
+
+# 兼容旧调用:少量地方仍引用 QUANT_PATTERN / PRO_VERBS
+QUANT_PATTERN = QUANT_WITH_UNIT
+PRO_VERBS = VERB_STRONG | VERB_NEUTRAL
 
 
 def _score_completeness(resume: Dict) -> Dict:
-    """完整度:看模块是否齐"""
-    parts = {
-        "basic": bool(resume.get("basic", {}).get("fullname")),
-        "education": bool(resume.get("education")),
-        "experiences": len(resume.get("experiences") or []) >= 1,
-        "experiences_2plus": len(resume.get("experiences") or []) >= 2,
-        "skills": bool((resume.get("skills") or {}).get("technical")),
-        "self_eval": bool(resume.get("self_evaluation"))
-    }
-    base = 50
-    bonus = sum([
-        10 if parts["basic"] else 0,
-        10 if parts["education"] else 0,
-        15 if parts["experiences"] else 0,
-        5 if parts["experiences_2plus"] else 0,
-        10 if parts["skills"] else 0,
-        0  # self_eval 不给加分(自动生成的容易刷分)
-    ])
-    score = min(100, base + bonus)
-    desc = "各模块齐全,结构清晰" if score >= 85 else "部分模块缺失,建议补充"
+    """
+    完整度:模块齐不齐 + 经历够不够。
+    零分锚定,不再给 50 分保底。经历数量是大学生简历的核心短板,
+    所以单独按段数梯度给分,而不是"有 1 段就满分"。
+    """
+    basic = resume.get("basic") or {}
+    exps = resume.get("experiences") or []
+    skills = resume.get("skills") or {}
+    n_exp = len(exps)
+
+    score = 0.0
+    # 基本信息:姓名 + 至少一种联系方式
+    if basic.get("fullname"):
+        score += 8
+    if basic.get("phone") or basic.get("email"):
+        score += 7
+    # 教育背景
+    if resume.get("education"):
+        score += 15
+    # 经历段数:1 段 18 分,梯度递增到 5 段满 40 分
+    exp_points = {0: 0, 1: 18, 2: 26, 3: 32, 4: 37}
+    score += exp_points.get(n_exp, 40) if n_exp <= 4 else 40
+    # 每段经历要有实际内容(bullets),空壳经历不算
+    filled = sum(1 for e in exps if (e.get("bullets") or []))
+    if n_exp:
+        score *= 1.0 if filled == n_exp else max(0.6, filled / n_exp)
+    # 技能清单
+    tech = skills.get("technical") if isinstance(skills, dict) else None
+    if tech:
+        score += 12
+        if len(tech) >= 5:
+            score += 3
+    # 获奖
+    if resume.get("awards"):
+        score += 8
+    # 自评仍不加分:自动生成的容易刷分
+    score = int(max(0, min(100, round(score))))
+
+    if score >= 85:
+        desc = "各模块齐全,结构清晰"
+    elif score >= 60:
+        desc = "主体结构完整,个别模块可补充"
+    elif score >= 35:
+        desc = "缺少关键模块,建议先补齐经历与技能"
+    else:
+        desc = "简历信息过少,请先补充教育背景与经历"
     return {"name": "完整度", "score": score, "max": 100, "desc": desc}
 
 
 def _score_quantification(resume: Dict) -> Dict:
-    """量化度:看 bullets 里有多少数字/百分比"""
-    bullets = []
-    for exp in resume.get("experiences", []):
-        bullets.extend(exp.get("bullets", []))
+    """
+    量化度:bullets 里有多少真正可衡量的成果。
+    旧实现只要句中有数字就算命中(Python3 也算),现在要求数字带量纲,
+    并对"显著/大幅"这类假量化倒扣分。
+    """
+    bullets = collect_bullets(resume)
     if not bullets:
-        return {"name": "量化度", "score": 50, "max": 100, "desc": "暂无经历可评估"}
+        return {"name": "量化度", "score": 0, "max": 100,
+                "desc": "尚无经历内容,无法评估量化程度"}
 
-    quant_count = 0
-    for b in bullets:
-        if QUANT_PATTERN.search(b):
-            quant_count += 1
-    ratio = quant_count / len(bullets)
-    score = int(min(100, 50 + ratio * 50))
-    desc = (
-        "经历描述含丰富数据,量化充分" if score >= 85
-        else "部分经历缺少具体数字,可继续补充"
-    )
+    per = [score_bullet_quant(b) for b in bullets]
+    avg = sum(per) / len(per)
+    # 平均分是主体(80%),再给"高质量条目占比"20% 的奖励,
+    # 避免所有 bullet 都是 0.6 分的平庸简历和有几条硬成果的简历同分。
+    strong_ratio = sum(1 for p in per if p >= 0.8) / len(per)
+    score = int(round((avg * 0.8 + strong_ratio * 0.2) * 100))
+    score = max(0, min(100, score))
+
+    if score >= 80:
+        desc = "成果量化充分,数据支撑有力"
+    elif score >= 55:
+        desc = "部分经历有数据,仍有条目缺少具体数字"
+    elif score >= 25:
+        desc = "量化偏少,多数描述停留在做了什么"
+    else:
+        desc = "几乎没有量化成果,建议补充数字与前后对比"
     return {"name": "量化度", "score": score, "max": 100, "desc": desc}
 
 
 def _score_professionalism_rule(resume: Dict) -> int:
-    """专业度的规则部分(动词命中率)"""
-    bullets = []
-    for exp in resume.get("experiences", []):
-        bullets.extend(exp.get("bullets", []))
+    """
+    专业度的规则部分。
+    旧实现只判断 bullet 中"任意位置"是否含专业动词,
+    现在综合动词强度(且要在开头)、句长、第一人称、因果结构。
+    """
+    bullets = collect_bullets(resume)
     if not bullets:
-        return 50
+        return 0
+    per = [score_bullet_professional(b) for b in bullets]
+    avg = sum(per) / len(per)
+    return int(round(max(0, min(100, avg * 100))))
 
-    hit_count = 0
-    for b in bullets:
-        if any(v in b for v in PRO_VERBS):
-            hit_count += 1
-    ratio = hit_count / len(bullets)
-    return int(min(100, 50 + ratio * 45))
 
 
 async def _score_professionalism_llm(resume: Dict) -> Dict:
     """专业度的 LLM 部分(LLM 评估语言)"""
     text = _resume_to_text(resume)
     if not text.strip():
-        return {"凝练度": 12, "精准度": 12, "流畅度": 12, "总分": 36, "改进建议": ""}
+        return {}
     try:
         raw = await llm_service.chat_complete(
             messages=[{"role": "user", "content": QUALITY_LLM_PROMPT.format(resume_text=text[:3500])}],
@@ -95,47 +146,119 @@ async def _score_professionalism_llm(resume: Dict) -> Dict:
         )
         return json.loads(_strip_code_fence(raw))
     except (llm_service.LLMError, json.JSONDecodeError):
-        return {"凝练度": 14, "精准度": 14, "流畅度": 14, "总分": 42, "改进建议": ""}
+        # 返回空 dict,让调用方退化为纯规则分。
+        # 不给固定兜底分,否则 LLM 挂掉时所有简历的专业度都会趋同。
+        return {}
 
 
 def _score_match(resume: Dict, target_job: str) -> Dict:
-    """匹配度:看 target_job 的关键词在简历里出现频次"""
-    text = _resume_to_text(resume).lower()
-    job = (target_job or resume.get("basic", {}).get("target_job") or "").lower()
-    if not job or not text:
-        return {"name": "匹配度", "score": 70, "max": 100, "desc": "未指定目标岗位"}
+    """
+    匹配度:目标岗位关键词在简历中的覆盖情况。
 
-    # 简单分词
-    job_keywords = set()
-    for w in re.split(r"[\s/、,,]+", job):
-        if len(w) >= 2:
-            job_keywords.add(w)
+    旧实现按 [\\s/、,,]+ 切词,中文岗位名没有分隔符,
+    "Java后端开发工程师" 整体成为一个 token,几乎永远命中不了,
+    导致该维度恒为 60/70 分。现在用词典最长匹配 + 2-gram 兜底切词,
+    并区分"技能区命中"和"经历正文命中"——后者更有说服力。
+    """
+    job = (target_job or (resume.get("basic") or {}).get("target_job") or "").strip()
+    if not job:
+        return {"name": "匹配度", "score": 0, "max": 100, "desc": "未指定目标岗位,无法评估匹配度"}
 
-    hits = sum(1 for kw in job_keywords if kw in text)
-    score = int(min(100, 60 + hits * 10))
-    desc = (
-        f"与「{target_job}」关键词对齐度较高" if score >= 80
-        else f"与「{target_job}」的关键词覆盖可继续优化"
-    )
+    keywords = tokenize_job(job)
+    if not keywords:
+        return {"name": "匹配度", "score": 0, "max": 100, "desc": "未能解析目标岗位关键词"}
+
+    # 经历正文 vs 技能清单分开统计:写进经历里的关键词才是真的会用
+    exp_text = " ".join(collect_bullets(resume)).lower()
+    for exp in resume.get("experiences") or []:
+        exp_text += " " + str(exp.get("title", "")).lower()
+        exp_text += " " + str(exp.get("role", "")).lower()
+    skills = resume.get("skills") or {}
+    skill_text = ""
+    if isinstance(skills, dict):
+        for group in skills.values():
+            if isinstance(group, list):
+                skill_text += " " + " ".join(str(s) for s in group).lower()
+
+    hit_exp = sum(1 for kw in keywords if kw in exp_text)
+    hit_skill = sum(1 for kw in keywords if kw not in exp_text and kw in skill_text)
+
+    # 经历命中权重 1.0,仅技能清单命中权重 0.5
+    covered = (hit_exp + hit_skill * 0.5) / len(keywords)
+
+    # 覆盖率封顶 —— 岗位名切出的关键词很少时(如"前端开发"只有 1 个 token),
+    # 命中一次就 100% 覆盖,该维度会退化成有/无二值。
+    # 关键词越少,单靠覆盖率能拿到的上限越低,剩余分数要靠"相关证据的厚度"补。
+    cap = {0: 0.0, 1: 0.62, 2: 0.78, 3: 0.9}.get(len(keywords), 1.0)
+    base = min(covered, cap)
+
+    # 证据厚度:命中关键词在经历正文里出现的总次数,以及技能清单的相关广度。
+    # 反复出现说明是真的主线技能,而不是简历里蹭了一个词。
+    depth_hits = sum(exp_text.count(kw) for kw in keywords if kw in exp_text)
+    depth = min(1.0, depth_hits / (len(keywords) * 3)) if keywords else 0.0
+    # 技能清单里与岗位相关的条目数
+    skill_items = 0
+    if isinstance(skills, dict):
+        for group in skills.values():
+            if isinstance(group, list):
+                skill_items += len(group)
+    breadth = min(1.0, skill_items / 6)
+
+    ratio = base + (1 - base) * (depth * 0.6 + breadth * 0.4) if base > 0 else 0.0
+    score = int(round(max(0, min(100, ratio * 100))))
+
+    if score >= 75:
+        desc = f"与「{job}」的关键词对齐度高"
+    elif score >= 45:
+        desc = f"与「{job}」部分对齐,核心关键词仍有缺口"
+    elif score > 0:
+        desc = f"与「{job}」的关键词覆盖偏低,建议在经历中显式体现"
+    else:
+        desc = f"经历中几乎未出现「{job}」相关关键词"
     return {"name": "匹配度", "score": score, "max": 100, "desc": desc}
 
 
 def _score_credibility(resume: Dict) -> Dict:
-    """可信度:基于经历的 tag color 与包装度估算"""
-    exps = resume.get("experiences", [])
-    if not exps:
-        return {"name": "可信度", "score": 80, "max": 100, "desc": "暂无经历"}
+    """
+    可信度:内容是否可追溯。
 
-    score = 100
+    旧实现只做减法(yellow -5 / red -15,下限 60),导致经历越多扣得越狠,
+    而"提供了 github 链接、具体数字"这类可验证信号完全不加分。
+    现在改为双向:包装度扣分,可验证细节加分。
+    """
+    exps = resume.get("experiences") or []
+    if not exps:
+        return {"name": "可信度", "score": 0, "max": 100,
+                "desc": "尚无经历内容,无法评估可信度"}
+
+    # 基准 70 分:没有任何信号时的中性态度
+    score = 70.0
+
+    # 包装度标签
     for exp in exps:
         color = (exp.get("tag") or {}).get("color", "green")
         if color == "yellow":
-            score -= 5
+            score -= 6
         elif color == "red":
-            score -= 15
-    score = max(60, score)
-    desc = "内容真实可追溯" if score >= 85 else "部分经历包装度偏高,建议核实"
+            score -= 16
+
+    # bullet 级的可验证性,平均后放大
+    bullets = collect_bullets(resume)
+    if bullets:
+        cred = sum(score_bullet_credibility(b) for b in bullets) / len(bullets)
+        score += cred * 30  # -30 ~ +30
+
+    score = int(max(0, min(100, round(score))))
+    if score >= 85:
+        desc = "内容真实可追溯,有可验证的细节支撑"
+    elif score >= 65:
+        desc = "整体可信,建议补充链接、证明人等佐证"
+    elif score >= 40:
+        desc = "部分表述缺乏佐证,包装感偏强"
+    else:
+        desc = "夸大或模糊表述较多,建议改为可验证的事实"
     return {"name": "可信度", "score": score, "max": 100, "desc": desc}
+
 
 
 def _resume_to_text(resume: Dict) -> str:
@@ -167,20 +290,41 @@ async def evaluate_resume(resume: Dict, target_job: str = "") -> Dict:
     quantification = _score_quantification(resume)
 
     prof_rule = _score_professionalism_rule(resume)
-    prof_llm = await _score_professionalism_llm(resume)
-    prof_llm_total = prof_llm.get("总分", 42)
-    prof_score = int(prof_rule * 0.5 + (prof_llm_total / 60 * 100) * 0.5)
-    prof_score = min(100, max(50, prof_score))
+    has_bullets = bool(collect_bullets(resume))
+    if not has_bullets:
+        # 没有正文就没什么可评的,不调 LLM 也不给保底分
+        prof_score = 0
+    else:
+        prof_llm = await _score_professionalism_llm(resume)
+        prof_llm_total = prof_llm.get("总分")
+        if isinstance(prof_llm_total, (int, float)) and prof_llm_total > 0:
+            # LLM 满分 60,归一化到 100 后与规则分各占一半
+            prof_score = int(prof_rule * 0.5 + (prof_llm_total / 60 * 100) * 0.5)
+        else:
+            # LLM 不可用时退化为纯规则分,而不是给一个固定的 42 分兜底
+            prof_score = prof_rule
+        prof_score = max(0, min(100, prof_score))
+    if prof_score >= 80:
+        prof_desc = "用词专业,动词有力"
+    elif prof_score >= 55:
+        prof_desc = "表达基本规范,部分条目可再精炼"
+    elif prof_score >= 25:
+        prof_desc = "用词偏口语化,建议改为专业动词开头"
+    else:
+        prof_desc = "缺少专业化表达,建议按『动词+对象+结果』重写"
     professionalism = {
-        "name": "专业度", "score": prof_score, "max": 100,
-        "desc": "用词专业,动词有力" if prof_score >= 85 else "可进一步精炼用词"
+        "name": "专业度", "score": prof_score, "max": 100, "desc": prof_desc
     }
 
     match = _score_match(resume, target_job)
     credibility = _score_credibility(resume)
 
     dimensions = [completeness, quantification, professionalism, match, credibility]
-    total = int(sum(d["score"] for d in dimensions) / len(dimensions))
+    # 加权总分:量化度/专业度是主要区分点,完整度只是及格线
+    total = int(round(sum(
+        d["score"] * DIMENSION_WEIGHTS.get(d["name"], 0.2) for d in dimensions
+    )))
+    total = max(0, min(100, total))
     grade, grade_color = _grade_of(total)
 
     # 亮点 = 分数最高的前 2 个
@@ -232,13 +376,18 @@ async def evaluate_resume(resume: Dict, target_job: str = "") -> Dict:
 
 
 def _grade_of(score: int) -> Tuple[str, str]:
-    if score >= 90:
+    """
+    评级阈值。配合零分锚定的评分曲线下调:
+    新算法下 75 分已是一份相当扎实的简历,沿用旧的 90/80 阈值会让
+    绝大多数真实简历都落到"待提升",反而失去指导意义。
+    """
+    if score >= 82:
         return "卓越", "#10B981"
-    if score >= 80:
+    if score >= 68:
         return "优秀", "#10B981"
-    if score >= 70:
+    if score >= 52:
         return "良好", "#F59E0B"
-    if score >= 60:
+    if score >= 35:
         return "合格", "#F59E0B"
     return "待提升", "#EF4444"
 
@@ -267,6 +416,29 @@ def _find_weakest_bullet(resume: Dict, predicate) -> Dict:
                     "bullet": b
                 }
     return {}
+
+
+def _worst_bullet_by(resume: Dict, scorer) -> Dict:
+    """
+    按打分函数找出得分最低的 bullet(而非第一个不合格的)。
+    改进建议指向最差的那条更有说服力。
+    """
+    worst = {}
+    worst_score = None
+    for exp in resume.get("experiences") or []:
+        for b in exp.get("bullets") or []:
+            if not isinstance(b, str) or not b.strip():
+                continue
+            s = scorer(b)
+            if worst_score is None or s < worst_score:
+                worst_score = s
+                worst = {
+                    "exp_id": exp.get("id", ""),
+                    "exp_title": exp.get("title", ""),
+                    "bullet": b,
+                    "score": s,
+                }
+    return worst
 
 
 def _rewrite_with_quant(bullet: str) -> str:
@@ -299,7 +471,7 @@ def _rewrite_with_pro_verb(bullet: str) -> str:
 def _build_improvement(dim: Dict, resume: Dict) -> Dict:
     name = dim["name"]
     if name == "量化度":
-        hit = _find_weakest_bullet(resume, lambda b: not QUANT_PATTERN.search(b))
+        hit = _worst_bullet_by(resume, score_bullet_quant)
         evidence = hit.get("bullet", "")
         target_id = hit.get("exp_id", "")
         actions = []
@@ -383,10 +555,7 @@ def _build_improvement(dim: Dict, resume: Dict) -> Dict:
             ]
         }
     if name == "专业度":
-        hit = _find_weakest_bullet(
-            resume,
-            lambda b: not any(v in b for v in PRO_VERBS)
-        )
+        hit = _worst_bullet_by(resume, score_bullet_professional)
         evidence = hit.get("bullet", "")
         target_id = hit.get("exp_id", "")
         actions = []
