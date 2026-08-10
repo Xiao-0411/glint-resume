@@ -1,155 +1,32 @@
 """
-智联招聘 爬虫
-"""
-import asyncio
-import json
-import logging
-import random
-import re
-from typing import List, Optional
+智联招聘 爬虫 —— 已停用
 
-from app.crawlers.base import BaseCrawler, JOB_KEYWORDS
+2026-08 实测结论：
+fe-api.zhaopin.com/c/i/sou 返回 HTTP 200、code=200，看起来一切正常，
+但 data.results 恒为空数组（numTotal=0），响应里带 isVerification 字段 ——
+说明需要通过验证/登录态才会下发真实数据。老代码判断的是 code==200，
+所以它会安静地拿到 0 条职位而不报错，这也是之前"爬虫在跑但库里没数据"的原因之一。
+
+当前职位数据全部来自猎聘（见 liepin.py）。
+
+保留此文件是为了记录结论。如果哪天要重启：
+接口是 GET fe-api.zhaopin.com/c/i/sou，参数 kw/p/pageSize/workCity，
+返回结构 data.results[]，元素含 number/jobName/company.name/salary/city.display。
+"""
+import logging
+from typing import List
+
+from app.crawlers.base import BaseCrawler
 
 logger = logging.getLogger("glint.crawler.zhaopin")
 
-# 智联招聘搜索 API
-ZHAOPIN_SEARCH_URL = "https://fe-api.zhaopin.com/c/i/sou"
-ZHAOPIN_JOB_URL = "https://jobs.zhaopin.com/{}.htm"
+ENABLED = False
 
 
 class ZhaopinCrawler(BaseCrawler):
     platform = "zhaopin"
     base_url = "https://www.zhaopin.com"
 
-    def _default_headers(self) -> dict:
-        h = super()._default_headers()
-        h.update({
-            "Referer": "https://www.zhaopin.com/",
-            "Origin": "https://www.zhaopin.com",
-        })
-        return h
-
     async def crawl(self, keywords: List[str] = None) -> List[dict]:
-        """抓取智联招聘职位"""
-        keywords = keywords or JOB_KEYWORDS
-        all_jobs = []
-        seen = set()
-
-        for kw in keywords:
-            try:
-                jobs = await self._search_keyword(kw)
-                for job in jobs:
-                    jid = job.get("platform_job_id", "")
-                    if jid and jid not in seen:
-                        seen.add(jid)
-                        all_jobs.append(job)
-                logger.info("zhaopin_crawl_kw", extra={"keyword": kw, "count": len(jobs)})
-            except Exception as e:
-                logger.warning("zhaopin_crawl_kw_failed", extra={"keyword": kw, "error": str(e)})
-                continue
-
-        logger.info("zhaopin_crawl_done", extra={"total": len(all_jobs)})
-        return all_jobs
-
-    async def _search_keyword(self, keyword: str, page: int = 1) -> List[dict]:
-        """搜索单个关键词"""
-        jobs = []
-        params = {
-            "kw": keyword,
-            "p": page,
-            "pageSize": 30,
-            "workCity": "0",  # 全国
-        }
-        try:
-            resp = await self._get(ZHAOPIN_SEARCH_URL, params=params)
-            data = resp.json()
-            if data.get("code") != 200:
-                logger.warning("zhaopin_api_error", extra={"code": data.get("code"), "msg": data.get("message")})
-                return jobs
-
-            results = data.get("data", {}).get("results", [])
-            for item in results:
-                try:
-                    job = self._parse_job_item(item)
-                    if job:
-                        jobs.append(job)
-                except Exception as e:
-                    logger.debug("zhaopin_parse_item_failed", extra={"error": str(e)})
-                    continue
-
-        except Exception as e:
-            logger.warning("zhaopin_search_failed", extra={"keyword": keyword, "error": str(e)})
-
-        return jobs
-
-    def _parse_job_item(self, item: dict) -> Optional[dict]:
-        """解析单个职位"""
-        job_id = str(item.get("number", item.get("positionId", "")))
-        if not job_id:
-            return None
-
-        title = item.get("jobName", item.get("name", ""))
-        company_data = item.get("company", {}) or {}
-        company = company_data.get("name", "") if isinstance(company_data, dict) else str(company_data)
-        if not title or not company:
-            return None
-
-        # 薪资
-        salary = item.get("salary", item.get("salary60", ""))
-
-        # 地点
-        city_data = item.get("city", {}) or {}
-        if isinstance(city_data, dict):
-            location = city_data.get("display", city_data.get("items", [{}])[0].get("name", "") if city_data.get("items") else "")
-        else:
-            location = str(city_data)
-
-        # 经验/学历
-        exp = item.get("workingExp", {}).get("name", "") if isinstance(item.get("workingExp"), dict) else ""
-        edu = item.get("eduLevel", {}).get("name", "") if isinstance(item.get("eduLevel"), dict) else ""
-
-        # 标签
-        tags = []
-        welfare = item.get("welfare", []) or []
-        if isinstance(welfare, list):
-            tags = welfare[:5]
-
-        # 职位描述
-        desc = item.get("jobDescription", item.get("description", ""))
-
-        # 技能要求
-        requirements = self._extract_requirements(desc)
-
-        return self.normalize_job({
-            "job_id": job_id,
-            "title": title,
-            "company": company,
-            "salary": salary,
-            "location": location,
-            "experience": exp,
-            "education": edu,
-            "tags": tags,
-            "description": desc,
-            "requirements": requirements,
-            "url": ZHAOPIN_JOB_URL.format(job_id),
-        })
-
-    def _extract_requirements(self, desc: str) -> List[str]:
-        if not desc:
-            return []
-        skill_patterns = [
-            "Java", "Python", "Go", "C\\+\\+", "JavaScript", "TypeScript", "Rust",
-            "Spring", "Django", "Flask", "Vue", "React", "Angular", "Node\\.js",
-            "MySQL", "Redis", "MongoDB", "PostgreSQL", "Elasticsearch", "Kafka",
-            "Docker", "Kubernetes", "Linux", "Git", "AWS", "Azure",
-            "产品设计", "需求分析", "用户研究", "数据分析", "项目管理",
-            "Figma", "Axure", "Sketch", "PRD", "SQL", "Excel",
-            "机器学习", "深度学习", "NLP", "CV", "TensorFlow", "PyTorch",
-            "自动化测试", "性能测试", "Selenium", "JMeter",
-            "UI设计", "交互设计", "用户体验",
-        ]
-        found = []
-        for pattern in skill_patterns:
-            if re.search(pattern, desc, re.IGNORECASE):
-                found.append(pattern.replace("\\", ""))
-        return found[:10]
+        logger.info("zhaopin_disabled", extra={"reason": "api returns empty results without auth"})
+        return []

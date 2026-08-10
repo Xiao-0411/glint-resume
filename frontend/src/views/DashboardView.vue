@@ -63,6 +63,14 @@
           <button class="no-resume-btn" @click="goCreateResume">去创建简历</button>
         </div>
 
+        <!-- 示例数据提示 —— 职位库为空时的兜底，必须让用户看清 -->
+        <div v-if="demoNotice && !huntStore.searchLoading" class="demo-notice">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <span>{{ demoNotice }}</span>
+        </div>
+
         <!-- 加载 -->
         <div v-if="huntStore.searchLoading" class="loading-state">
           <div class="spinner"></div>
@@ -100,14 +108,14 @@
                 <div class="job-top-right">
                   <span :class="['match-tag', job.matchLevel]">
                     <span class="match-dot"></span>
-                    {{ job.matchLevel === 'green' ? '高匹配' : job.matchLevel === 'yellow' ? '中匹配' : '低匹配' }}
-                    {{ job.matchScore }}%
+                    {{ matchLabel(job.matchLevel) }}
+                    <template v-if="job.matchScore !== null && job.matchScore !== undefined">{{ job.matchScore }}%</template>
                   </span>
                   <span class="job-salary">{{ job.salary }}</span>
                 </div>
               </div>
 
-              <p class="job-desc">{{ job.description }}</p>
+              <p class="job-desc">{{ job.description || '该职位的详细描述尚未同步，可点击「查看原始职位」了解完整信息。' }}</p>
 
               <!-- 匹配理由 -->
               <div class="match-reason">
@@ -125,6 +133,18 @@
 
               <!-- 操作按钮 -->
               <div class="job-actions" @click.stop>
+                <a
+                  v-if="job.url"
+                  class="action-btn link-btn"
+                  :href="job.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                  </svg>
+                  查看原始职位
+                </a>
                 <button
                   v-if="job.matchLevel === 'green'"
                   class="action-btn primary"
@@ -136,7 +156,7 @@
                   </svg>
                   {{ appliedJobIds[job.id] ? '已投递' : '一键投递' }}
                 </button>
-                <template v-if="job.matchLevel === 'yellow'">
+                <template v-if="job.matchLevel === 'yellow' || job.matchLevel === 'unknown'">
                   <button
                     class="action-btn secondary"
                     @click="onAdaptResume(job)"
@@ -581,8 +601,8 @@
             <span class="detail-salary">{{ detailJob.salary }}</span>
             <span :class="['match-tag', detailLevel]">
               <span class="match-dot"></span>
-              {{ detailLevel === 'green' ? '高匹配' : detailLevel === 'yellow' ? '中匹配' : '低匹配' }}
-              {{ detailJob.matchScore }}%
+              {{ matchLabel(detailLevel) }}
+              <template v-if="detailJob.matchScore !== null && detailJob.matchScore !== undefined">{{ detailJob.matchScore }}%</template>
             </span>
           </div>
         </div>
@@ -597,7 +617,19 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               职位描述
             </h4>
-            <p class="detail-desc">{{ detailJob.description }}</p>
+            <p class="detail-desc">{{ detailJob.description || '该职位的详细描述尚未同步，可点击下方「查看原始职位」了解完整信息。' }}</p>
+            <a
+              v-if="detailJob.url"
+              class="detail-source-link"
+              :href="detailJob.url"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              查看原始职位<template v-if="detailJob.platform === 'liepin'">（猎聘）</template>
+            </a>
           </div>
 
           <div class="detail-section">
@@ -887,6 +919,20 @@ const tabs = computed(() => [
 
 const toast = reactive({ visible: false, message: '', type: 'success' })
 
+// 非空表示当前列表是示例数据，需要在页面上明确提示
+const demoNotice = ref('')
+
+const MATCH_LABELS = {
+  green: '高匹配',
+  yellow: '中匹配',
+  red: '低匹配',
+  unknown: '待评估'
+}
+
+function matchLabel(level) {
+  return MATCH_LABELS[level] || '待评估'
+}
+
 function showToast(msg, type = 'success') {
   toast.message = msg
   toast.type = type
@@ -906,6 +952,8 @@ async function onSearch() {
       targetJob: chatStore.targetJob
     })
     huntStore.setMatchedJobs(result.jobs)
+    // 后端库空时会回退示例数据，这里如实告知用户，别让人误以为是真实岗位
+    demoNotice.value = result.isDemo ? (result.notice || '当前展示的是示例职位，请勿据此投递。') : ''
   } catch (e) {
     showToast('搜索失败，请重试', 'error')
   } finally {
@@ -1225,6 +1273,7 @@ onMounted(() => {
 .match-tag.green { background: #D1FAE5; color: #059669; }
 .match-tag.yellow { background: #FEF3C7; color: #D97706; }
 .match-tag.red { background: #FEE2E2; color: #DC2626; }
+.match-tag.unknown { background: var(--color-bg-hover); color: var(--color-text-muted); }
 .match-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -1236,6 +1285,11 @@ onMounted(() => {
   color: var(--color-text-secondary);
   line-height: 1.7;
   margin-bottom: 16px;
+  /* JD 正文较长，列表里只露出前几行，详情页看全文 */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .match-reason {
@@ -1270,6 +1324,22 @@ onMounted(() => {
 }
 
 .job-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.demo-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 14px 18px;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: #B45309;
+  background: #FEF3C7;
+  border: 1px solid #FCD34D;
+  border-radius: var(--radius-md);
+}
+.demo-notice svg { flex-shrink: 0; }
+
 .action-btn {
   display: flex;
   align-items: center;
@@ -1297,6 +1367,17 @@ onMounted(() => {
   background: var(--color-primary-lighter);
 }
 .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.action-btn.link-btn {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  text-decoration: none;
+}
+.action-btn.link-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
 .disabled-btn {
   background: var(--color-bg-hover);
   color: var(--color-text-muted);
@@ -1813,7 +1894,19 @@ onMounted(() => {
   font-size: 1.05rem;
   color: var(--color-text-secondary);
   line-height: 1.8;
+  white-space: pre-line;
 }
+.detail-source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  text-decoration: none;
+}
+.detail-source-link:hover { text-decoration: underline; }
 .detail-tags {
   display: flex;
   flex-wrap: wrap;

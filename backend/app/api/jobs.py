@@ -8,6 +8,7 @@ POST /api/jobs/applications/status  ——  更新投递状态（持久化）
 职位数据优先从爬虫库（jobs 表）读取，库为空时 fallback 到 mock 数据。
 """
 import datetime
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -68,51 +69,80 @@ def _db_job_search(keyword: str = "", db: DBSession = None, limit: int = 60) -> 
             "tags": row.tags or [],
             "description": row.description or "",
             "requirements": row.requirements or [],
+            # 真实职位才有的字段 —— 前端据此展示"查看原始职位"入口
+            "experience": row.experience or "",
+            "education": row.education or "",
+            "url": row.url or "",
+            "platform": row.platform or "",
+            "isReal": True,
         })
     return results
 
 
 def _calc_match(target_job: str, job: dict) -> dict:
-    """计算岗位匹配度"""
+    """计算岗位匹配度。
+
+    真实职位的 requirements 来自 JD 正文提取，可能为空（详情页配额没轮到它）。
+    这种情况下不能编一个分数出来 —— 标成 unknown，让前端明确显示"待评估"，
+    而不是给个 50 分的黄灯误导用户去投递。
+    """
+    requirements = job.get("requirements") or []
+    if not requirements:
+        return {
+            "score": None,
+            "matched_keywords": [],
+            "level": "unknown",
+            "missing": [],
+            "reasons": "该职位描述尚未同步，暂无法评估匹配度，可点击查看原始职位了解详情",
+        }
+
     t = (target_job or "").lower()
     keywords = []
     for k, v in KW_MAP.items():
         if k.lower() in t:
             keywords = v
             break
+
+    # 没命中预设岗位画像时，用职位自身要求当基准会得出 100% 的虚高分数
+    # （自己跟自己比），所以退回按目标岗位名做字面匹配。
     if not keywords:
-        keywords = job["requirements"][:4] if job["requirements"] else []
+        keywords = [w for w in re.split(r"[\s/、,，]+", target_job or "") if len(w) >= 2]
 
-    requirements = job.get("requirements", [])
-    if not requirements:
-        return {"score": 50, "matched_keywords": [], "level": "yellow", "missing": [], "reasons": "匹配度未知"}
+    if not keywords:
+        return {
+            "score": None,
+            "matched_keywords": [],
+            "level": "unknown",
+            "missing": [],
+            "reasons": "填写目标岗位后即可查看匹配度分析",
+        }
 
-    match_count = 0
     matched = []
     for req in requirements:
         for kw in keywords:
             if kw.lower() in req.lower() or req.lower() in kw.lower():
-                match_count += 1
-                matched.append(kw)
+                if kw not in matched:
+                    matched.append(kw)
                 break
 
-    score = round((match_count / len(requirements)) * 100) if requirements else 50
+    # 以「目标岗位要求的技能被这个职位覆盖了多少」为准
+    score = round((len(matched) / len(keywords)) * 100)
+    missing = [r for r in requirements if not any(
+        mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
 
-    if score >= 85:
-        level, reasons = "green", f"岗位要求「{'、'.join(matched[:3])}」与你的技能高度匹配"
+    if score >= 70:
+        level = "green"
+        reasons = f"岗位要求「{'、'.join(matched[:3])}」与你的技能高度匹配"
         missing = []
-    elif score >= 60:
-        missing = [r for r in requirements if not any(
-            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
-        reasons = f"匹配度中等，建议微调简历突出「{'、'.join(matched)}」等技能"
-        missing = missing[:2]
+    elif score >= 40:
         level = "yellow"
+        reasons = f"匹配度中等，建议微调简历突出「{'、'.join(matched[:3])}」等技能"
+        missing = missing[:2]
     else:
-        missing = [r for r in requirements if not any(
-            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
-        reasons = f"核心技能「{'、'.join(missing[:3])}」暂不匹配，建议先补足再投递"
-        missing = missing[:3]
         level = "red"
+        hint = '、'.join(missing[:3]) if missing else '、'.join(keywords[:3])
+        reasons = f"核心技能「{hint}」暂不匹配，建议先补足再投递"
+        missing = missing[:3]
 
     return {
         "score": score,
@@ -125,14 +155,17 @@ def _calc_match(target_job: str, job: dict) -> dict:
 
 @router.post("/jobs/search")
 async def job_search(req: JobSearchRequest, current_user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    """搜索职位并进行匹配分级。优先从爬虫库读取，库空时回退 mock。"""
+    """搜索职位并进行匹配分级。优先从爬虫库读取，库空时回退 mock 并明确告知用户。"""
     keyword = req.keyword or req.target_job or ""
 
-    # 优先从数据库读取
+    # 优先从数据库读取真实职位
     db_jobs = _db_job_search(keyword=keyword, db=db)
 
+    # 关键词没搜到，但库里有真实职位 —— 退回展示最新职位，别拿假数据糊弄
+    if not db_jobs and keyword:
+        db_jobs = _db_job_search(keyword="", db=db)
+
     if db_jobs:
-        # 用真实数据做匹配分级
         matched = []
         for job in db_jobs:
             m = _calc_match(req.target_job or keyword, job)
@@ -143,12 +176,18 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
                 "reasons": m["reasons"],
                 "missingSkills": m["missing"],
             })
-        matched.sort(key=lambda x: x["matchScore"], reverse=True)
+        # 能算出分的排前面，待评估的沉底；同分按抓取时间（列表已按 crawled_at 倒序）
+        matched.sort(key=lambda x: (x["matchScore"] is not None, x["matchScore"] or 0), reverse=True)
         return {"jobs": matched, "total": len(matched), "source": "db"}
 
-    # 数据库为空，回退 mock
+    # 数据库为空 —— 回退示例数据，但必须让用户知道这不是真实岗位
     result = mock_job_search(keyword=keyword, target_job=req.target_job)
     result["source"] = "mock"
+    result["isDemo"] = True
+    result["notice"] = "职位库正在同步中，当前展示的是示例职位，仅供体验匹配功能，请勿据此投递。"
+    for job in result.get("jobs", []):
+        job["isReal"] = False
+        job["url"] = ""
     return result
 
 
