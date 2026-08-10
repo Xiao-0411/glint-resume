@@ -9,7 +9,7 @@
         </svg>
         <span>首页</span>
       </button>
-      <span class="brand-name">识光简历</span>
+      <span class="brand-name"><BrandMark :size="26" label="识光简历" /><strong>识光</strong><span>简历</span></span>
       <div class="topbar-right">
         <router-link to="/dashboard" class="ghost-btn accent">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -240,6 +240,7 @@ import { storeToRefs } from 'pinia'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
 import ResumePreview from '@/components/ResumePreview.vue'
+import BrandMark from '@/components/BrandMark.vue'
 import ExperienceEditDialog from '@/components/ExperienceEditDialog.vue'
 import ReEvaluateDialog from '@/components/ReEvaluateDialog.vue'
 import { resumeApi, sessionApi } from '@/api'
@@ -676,11 +677,21 @@ function goHome() {
 }
 
 .brand-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
   font-size: 1.25rem;
   font-weight: 700;
   color: var(--color-text);
-  letter-spacing: -0.2px;
+  letter-spacing: 0;
+}
+.brand-name strong {
+  font-weight: 800;
+}
+.brand-name > span {
+  color: var(--color-text-muted);
+  font-size: 0.9em;
 }
 
 .ghost-btn {

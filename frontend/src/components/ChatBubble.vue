@@ -1,9 +1,7 @@
 <template>
   <div class="chat-bubble" :class="`role-${role}`">
     <div class="avatar" v-if="role === 'ai'">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-      </svg>
+      <BrandMark :size="26" label="识光简历 AI" />
     </div>
     <div class="bubble-wrap">
       <div class="bubble">
@@ -44,6 +42,7 @@
 
 <script setup>
 import { computed, ref, watch, onMounted } from 'vue'
+import BrandMark from '@/components/BrandMark.vue'
 
 const props = defineProps({
   role: {
@@ -171,16 +170,13 @@ function pushPlainText(parts, text) {
 }
 
 .role-ai .avatar {
-  background: var(--gradient-primary);
+  background: #FFFFFF;
+  border: 1px solid var(--color-border-light);
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.12);
 }
 
 .role-ai .avatar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 50%);
-  pointer-events: none;
+  content: none;
 }
 
 .avatar-user {

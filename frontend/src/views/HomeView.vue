@@ -196,7 +196,7 @@
       <div class="container">
         <div class="footer-grid">
           <div class="footer-brand">
-            <span class="footer-logo">识光简历</span>
+            <span class="footer-logo"><BrandMark :size="30" label="识光简历" /><span><strong>识光</strong>简历</span></span>
             <span class="footer-tagline">AI 驱动的智能简历平台</span>
           </div>
           <div class="footer-col">
@@ -225,6 +225,7 @@ import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
+import BrandMark from '@/components/BrandMark.vue'
 import { extractJobName } from '@/utils/jobMatcher'
 import HomeIcon from '@/components/home/HomeIcon.vue'
 import SpotlightCard from '@/components/effects/SpotlightCard.vue'
@@ -1163,12 +1164,19 @@ function goUpload() {
 }
 
 .footer-logo {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  letter-spacing: 0;
+}
+
+.footer-logo strong {
+  color: var(--color-text);
   font-weight: 800;
-  background: linear-gradient(135deg, #4F46E5, #7C3AED);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  margin-right: 4px;
 }
 
 .footer-tagline {

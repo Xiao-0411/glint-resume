@@ -3,13 +3,8 @@
     <div class="nav-inner">
       <!-- 品牌 Logo -->
       <router-link to="/" class="brand-logo" title="回到首页">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="logo-svg">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <polyline points="14 2 14 8 20 8"/>
-          <line x1="16" y1="13" x2="8" y2="13"/>
-          <line x1="16" y1="17" x2="8" y2="17"/>
-        </svg>
-        <span class="logo-text">识光简历</span>
+        <BrandMark :size="34" label="识光简历" />
+        <span class="logo-text"><strong>识光</strong><span>简历</span></span>
       </router-link>
 
       <!-- Dock 风格导航 -->
@@ -88,6 +83,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import LoginDialog from '@/components/LoginDialog.vue'
 import ResumeHistoryDialog from '@/components/ResumeHistoryDialog.vue'
+import BrandMark from '@/components/BrandMark.vue'
 
 const auth = useAuthStore()
 const showDropdown = ref(false)
@@ -182,11 +178,22 @@ onUnmounted(() => window.removeEventListener('click', handleClickOutside))
   transition: opacity 0.2s ease;
 }
 .brand-logo:hover { opacity: 0.8; }
-.logo-svg { color: var(--color-primary); }
 .logo-text {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
   font-weight: 700;
-  font-size: 1.1rem;
   color: var(--color-text);
+  letter-spacing: 0;
+}
+.logo-text strong {
+  font-size: 1.18rem;
+  font-weight: 800;
+}
+.logo-text span {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
 }
 
 /* Dock 风格导航 */
@@ -371,7 +378,7 @@ onUnmounted(() => window.removeEventListener('click', handleClickOutside))
     grid-template-columns: 34px minmax(0, 1fr) 34px;
     gap: 3px;
   }
-  .brand-logo svg { width: 28px; height: 28px; }
+  .brand-logo .brand-mark { width: 28px; height: 28px; }
   .nav-dock { gap: 4px; }
   .dock-item { height: 34px; padding: 0 5px; font-size: 0.75rem; }
   .login-btn { padding: 7px; }

@@ -8,7 +8,7 @@
         </svg>
         <span>返回首页</span>
       </button>
-      <span class="brand-name">识光简历</span>
+      <span class="brand-name"><BrandMark :size="26" label="识光简历" /><strong>识光</strong><span>简历</span></span>
     </header>
 
     <!-- 主体 -->
@@ -145,6 +145,7 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
+import BrandMark from '@/components/BrandMark.vue'
 import { resumeApi } from '@/api'
 import { parsePdf, formatFileSize } from '@/utils/pdfParser'
 import LoadingOverlay from '@/components/LoadingOverlay.vue'
@@ -308,11 +309,21 @@ function goHome() {
 }
 
 .brand-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
   font-size: 1.25rem;
   font-weight: 700;
   color: var(--color-text);
-  letter-spacing: -0.2px;
+  letter-spacing: 0;
+}
+.brand-name strong {
+  font-weight: 800;
+}
+.brand-name > span {
+  color: var(--color-text-muted);
+  font-size: 0.9em;
 }
 
 /* Hero 文本 */

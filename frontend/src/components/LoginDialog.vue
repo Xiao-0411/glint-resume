@@ -15,12 +15,7 @@
       <!-- 品牌化头部 -->
       <div class="login-head">
         <div class="login-logo">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-            <line x1="16" y1="13" x2="8" y2="13"/>
-            <line x1="16" y1="17" x2="8" y2="17"/>
-          </svg>
+          <BrandMark :size="68" label="识光简历" />
         </div>
         <h2 class="login-title">{{ isRegister ? '创建账号' : '欢迎回来' }}</h2>
         <p class="login-sub">{{ isRegister ? '注册后即可保存你的专属简历与投递记录' : '登录后即可生成、保存与投递你的专属简历' }}</p>
@@ -114,6 +109,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 import { NModal } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
+import BrandMark from '@/components/BrandMark.vue'
 
 const auth = useAuthStore()
 const username = ref('')
@@ -310,23 +306,19 @@ onUnmounted(clearCountdown)
   margin-bottom: 28px;
 }
 .login-logo {
-  width: 72px;
-  height: 72px;
+  width: 68px;
+  height: 68px;
   margin: 0 auto 18px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-xl);
-  background: var(--gradient-primary);
-  color: #fff;
-  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
-.login-logo svg { width: 36px; height: 36px; }
+.login-logo svg { width: 68px; height: 68px; }
 .login-title {
   font-size: 2.2rem;
   font-weight: 800;
   color: var(--color-text);
-  letter-spacing: -0.8px;
+  letter-spacing: 0;
   margin-bottom: 8px;
 }
 .login-sub {
