@@ -124,7 +124,13 @@ export const useAuthStore = defineStore('auth', () => {
     if (Array.isArray(detail)) {
       return detail[0]?.msg || fallback
     }
-    return detail || error?.message || fallback
+    if (detail) return detail
+    // 没有 response = 请求压根没到后端(服务未启动/跨域被拒/域名不通)。
+    // 此时 error.message 是 axios 的英文原文 "Network Error"，对用户毫无意义。
+    if (!error?.response) {
+      return '无法连接到服务器，请检查网络或确认后端服务已启动'
+    }
+    return error?.message || fallback
   }
 
   function logout() {

@@ -44,10 +44,17 @@ init_db()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+if settings.cors_origin_regex:
+    logger.info("cors_local_any_port_enabled", extra={
+        "regex": settings.cors_origin_regex,
+        "hint": "本地开发放行任意 localhost 端口;公网部署请设 CORS_ALLOW_LOCAL_ANY_PORT=false",
+    })
 
 
 # ====== 安全响应头中间件 ======

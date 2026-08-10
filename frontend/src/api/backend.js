@@ -1,13 +1,19 @@
 /**
  * 真实后端 API 调用（HTTP + SSE 流式）
- * 通过 VITE_API_BASE_URL 指向后端,默认 https://sgjl.cloud
+ * 通过 VITE_API_BASE_URL 指向后端;生产默认同源(空串),由 nginx 反代 /api/ 到后端
  */
 import axios from 'axios'
 
+// 生产用空串 = 相对路径 /api/*，走 nginx 同源反代(见 deploy/nginx/sgjl.cloud.conf)。
+// 不要写成独立子域名：那需要额外的 DNS/证书/CORS，配漏了前端只会显示 "Network Error"。
 const DEFAULT_BASE_URL = import.meta.env.DEV
   ? 'http://127.0.0.1:8000'
-  : 'https://api.sgjl.cloud'
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_BASE_URL
+  : ''
+// 不能用 ||：空串是「同源」这一有效取值，会被当成假值吞掉退回默认值。
+const rawBaseUrl = import.meta.env.VITE_API_BASE_URL
+const BASE_URL = (rawBaseUrl === undefined || rawBaseUrl === '')
+  ? DEFAULT_BASE_URL
+  : rawBaseUrl
 
 const http = axios.create({
   baseURL: BASE_URL,

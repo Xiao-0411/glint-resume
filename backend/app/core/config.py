@@ -34,12 +34,18 @@ class Settings:
 
     # App
     USE_MOCK: bool = os.getenv("USE_MOCK", "false").lower() == "true"
+    # 运行环境:development=本地开发,production=公网部署。部署时务必设为 production。
+    APP_ENV: str = os.getenv("APP_ENV", "development").strip().lower()
     CORS_ORIGINS: list = [
         o.strip() for o in os.getenv(
             "CORS_ORIGINS",
             "http://localhost:5173,http://127.0.0.1:5173"
         ).split(",") if o.strip()
     ]
+    # 本地开发时 vite 端口会漂移(5173 被占则跳 5174/5175...),固定白名单会让
+    # 预检直接 400,前端只能看到 axios 的 "Network Error"。开启后按正则放行任意
+    # 本地端口,不必每次改 .env。仅在 APP_ENV=development 时生效。
+    CORS_ALLOW_LOCAL_ANY_PORT: bool = os.getenv("CORS_ALLOW_LOCAL_ANY_PORT", "true").lower() == "true"
     PORT: int = int(os.getenv("PORT", "8000"))
 
     # Auth
@@ -89,6 +95,33 @@ class Settings:
     def smtp_available(self) -> bool:
         return bool(self.SMTP_HOST and self.SMTP_PORT and self.SMTP_FROM)
 
+    @property
+    def is_production(self) -> bool:
+        return self.APP_ENV == "production"
+
+    @property
+    def has_public_origin(self) -> bool:
+        """CORS 白名单里出现非本地来源,视为生产部署。"""
+        return any(
+            o.strip() and "localhost" not in o and "127.0.0.1" not in o
+            for o in self.CORS_ORIGINS
+        )
+
+    @property
+    def cors_origin_regex(self) -> str | None:
+        """
+        允许任意本地端口的正则。Starlette 用 fullmatch 匹配,所以
+        http://localhost.evil.com 这类后缀伪装不会命中。
+
+        只在 APP_ENV=development 时启用 —— 生产环境放行 localhost 等于给
+        攻击者本机页面开了带凭证请求的口子(allow_credentials=True)。
+        这里按 APP_ENV 而非"白名单里有没有公网域名"判定:本地 .env 常年
+        带着生产域名做参考,按域名判定会误伤本地开发。
+        """
+        if self.is_production or not self.CORS_ALLOW_LOCAL_ANY_PORT:
+            return None
+        return r"http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"
+
 
 # 本地开发用的固定密钥。仅在 CORS 只允许 localhost 时启用,
 # 一旦配置了公网域名就必须显式提供 AUTH_SECRET_KEY。
@@ -105,13 +138,7 @@ def _validate_auth_secret(cfg: "Settings") -> None:
     if cfg.AUTH_SECRET_KEY:
         return
 
-    is_public = any(
-        origin.strip()
-        and "localhost" not in origin
-        and "127.0.0.1" not in origin
-        for origin in cfg.CORS_ORIGINS
-    )
-    if is_public:
+    if cfg.has_public_origin:
         raise RuntimeError(
             "AUTH_SECRET_KEY 未配置,但 CORS_ORIGINS 含公网域名。\n"
             "空密钥会让 JWT 可被任意伪造(登录形同虚设)。\n"
