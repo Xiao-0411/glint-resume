@@ -131,12 +131,28 @@ start "GlintCrawler" /MIN cmd /c "cd /d "%BACKEND_DIR%" && "%VENV_PYTHON%" run_c
 echo [OK] Crawler started
 echo.
 
+rem 线上架构: sgjl.cloud 前端在 Cloudflare Pages, API 经本机 Tunnel 暴露为 api.sgjl.cloud。
+rem cloudflared 不是系统服务, 重启电脑就断 -> 线上登录报 Network Error, 所以随本脚本一起拉起。
+echo [Extra] Starting Cloudflare Tunnel (api.sgjl.cloud)...
+set "CLOUDFLARED_EXE="
+for /f "delims=" %%I in ('where cloudflared.exe 2^>nul') do if not defined CLOUDFLARED_EXE set "CLOUDFLARED_EXE=%%I"
+if not defined CLOUDFLARED_EXE if exist "%LocalAppData%\Microsoft\WinGet\Links\cloudflared.exe" set "CLOUDFLARED_EXE=%LocalAppData%\Microsoft\WinGet\Links\cloudflared.exe"
+if defined CLOUDFLARED_EXE (
+    start "GlintTunnel" /MIN cmd /c ""%CLOUDFLARED_EXE%" tunnel --config "%USERPROFILE%\.cloudflared\config-glint.yml" run"
+    echo [OK] Tunnel started - https://api.sgjl.cloud now points to this machine
+    echo      Tip: if it cannot connect, allow argotunnel.com / port 7844 in your proxy app
+) else (
+    echo [SKIP] cloudflared not found - https://api.sgjl.cloud will stay offline
+)
+echo.
+
 echo ============================================
 echo   ALL SERVICES STARTED SUCCESSFULLY!
 echo.
 echo   Frontend: http://localhost:5173/
 echo   Backend:  http://localhost:8000/docs
 echo   Crawler:  running in background (every 2h)
+echo   Tunnel:   https://api.sgjl.cloud -^> localhost:8000
 echo.
 echo   Close this window to stop all services
 echo ============================================
@@ -149,5 +165,6 @@ echo Stopping all services...
 taskkill /FI "WINDOWTITLE eq GlintBackend*" /T /F 2>nul
 taskkill /FI "WINDOWTITLE eq GlintFrontend*" /T /F 2>nul
 taskkill /FI "WINDOWTITLE eq GlintCrawler*" /T /F 2>nul
+taskkill /FI "WINDOWTITLE eq GlintTunnel*" /T /F 2>nul
 echo All services stopped
 pause >nul

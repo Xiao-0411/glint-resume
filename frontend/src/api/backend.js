@@ -1,15 +1,15 @@
 /**
  * 真实后端 API 调用（HTTP + SSE 流式）
- * 通过 VITE_API_BASE_URL 指向后端;生产默认同源(空串),由 nginx 反代 /api/ 到后端
+ * 通过 VITE_API_BASE_URL 指向后端。
+ * 生产架构:前端在 Cloudflare Pages(纯静态,无 /api 反代),后端经本机
+ * Cloudflare Tunnel 暴露为 api.sgjl.cloud —— 所以生产不能用同源相对路径。
  */
 import axios from 'axios'
 
-// 生产用空串 = 相对路径 /api/*，走 nginx 同源反代(见 deploy/nginx/sgjl.cloud.conf)。
-// 不要写成独立子域名：那需要额外的 DNS/证书/CORS，配漏了前端只会显示 "Network Error"。
 const DEFAULT_BASE_URL = import.meta.env.DEV
   ? 'http://127.0.0.1:8000'
-  : ''
-// 不能用 ||：空串是「同源」这一有效取值，会被当成假值吞掉退回默认值。
+  : 'https://api.sgjl.cloud'
+// 不能用 ||：万一显式配了空串会被当假值吞掉,悄悄退回默认值,不易排查。
 const rawBaseUrl = import.meta.env.VITE_API_BASE_URL
 const BASE_URL = (rawBaseUrl === undefined || rawBaseUrl === '')
   ? DEFAULT_BASE_URL
