@@ -106,7 +106,11 @@ def _save_jobs(jobs: List[dict]) -> int:
 
 
 async def _fill_missing_details(limit: int = DETAIL_BATCH) -> dict:
-    """给库里还没有 JD 正文的职位补详情。撞到配额就停，下轮继续。"""
+    """给库里还没有 JD 正文的职位补详情。
+
+    顺带处理已下架职位：详情页还在但没有 JD 正文的，直接置为失效，
+    否则它们会永远排在待补队列前面，每轮都白抓一次。
+    """
     db = SessionLocal()
     try:
         rows = (
@@ -126,7 +130,7 @@ async def _fill_missing_details(limit: int = DETAIL_BATCH) -> dict:
 
     if not pending:
         logger.info("detail_fill_skip", extra={"reason": "no_pending"})
-        return {"pending": 0, "filled": 0}
+        return {"pending": 0, "filled": 0, "expired": 0}
 
     crawler = LiepinCrawler()
     try:
@@ -135,15 +139,24 @@ async def _fill_missing_details(limit: int = DETAIL_BATCH) -> dict:
         await crawler.close()
 
     filled = 0
+    expired = 0
     db = SessionLocal()
     try:
         now = datetime.datetime.now(datetime.timezone.utc)
         for item in pending:
-            if not item.get("description"):
-                continue
             row = db.query(Job).filter(Job.id == item["id"]).first()
             if row is None:
                 continue
+
+            if item.get("expired"):
+                row.is_active = False
+                row.updated_at = now
+                expired += 1
+                continue
+
+            if not item.get("description"):
+                continue
+
             row.description = item["description"]
             row.requirements = item.get("requirements") or []
             if item.get("tags"):
@@ -151,14 +164,17 @@ async def _fill_missing_details(limit: int = DETAIL_BATCH) -> dict:
             row.updated_at = now
             filled += 1
         db.commit()
-        logger.info("detail_fill_done", extra={"pending": len(pending), "filled": filled})
+        logger.info(
+            "detail_fill_done",
+            extra={"pending": len(pending), "filled": filled, "expired": expired},
+        )
     except Exception as e:
         db.rollback()
         logger.error("detail_fill_save_failed", extra={"error": str(e)})
     finally:
         db.close()
 
-    return {"pending": len(pending), "filled": filled}
+    return {"pending": len(pending), "filled": filled, "expired": expired}
 
 
 def _deactivate_stale(days: int = STALE_DAYS) -> int:

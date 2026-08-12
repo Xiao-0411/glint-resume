@@ -59,6 +59,9 @@ _JD_RE = re.compile(r'<dd[^>]*data-selector="job-intro-content"[^>]*>(.*?)</dd>'
 _JD_MOBILE_RE = re.compile(r'<div[^>]*class="[^"]*job-describe-duty[^"]*"[^>]*>(.*?)</div>', re.S)
 # 职位福利标签
 _BENEFIT_RE = re.compile(r'<li[^>]*class="[^"]*(?:job-benefits-item|comp-tag)[^"]*"[^>]*>(.*?)</li>', re.S)
+# 职位已下架 —— 猎聘给过期职位单独加载了这个样式表，页面上没有 JD 正文，
+# 只有 meta 描述里残留岗位信息。靠它区分"抓取失败"和"岗位没了"。
+_EXPIRED_RE = re.compile(r"src_pages_job-expired", re.I)
 
 
 class LiepinCrawler(BaseCrawler):
@@ -250,11 +253,12 @@ class LiepinCrawler(BaseCrawler):
         就整批放弃，不白白发请求。
 
         jobs 里每项需要有 "url"；成功时就地写入 description/requirements/tags。
+        职位已下架的会写入 expired=True，交由调用方标记失效。
         """
         if not jobs:
-            return {"ok": 0, "blocked": 0, "no_jd": 0, "error": 0, "skipped": 0}
+            return {"ok": 0, "blocked": 0, "no_jd": 0, "error": 0, "skipped": 0, "expired": 0}
 
-        stats = {"ok": 0, "blocked": 0, "no_jd": 0, "error": 0, "skipped": 0}
+        stats = {"ok": 0, "blocked": 0, "no_jd": 0, "error": 0, "skipped": 0, "expired": 0}
         consecutive_block = 0
         give_up = False
 
@@ -293,6 +297,12 @@ class LiepinCrawler(BaseCrawler):
 
                     consecutive_block = 0
                     html = resp.text
+
+                    # 职位已下架 —— 页面还在但没有 JD，标记出来让上层置为失效
+                    if _EXPIRED_RE.search(html):
+                        job["expired"] = True
+                        stats["expired"] += 1
+                        continue
 
                     m = _JD_RE.search(html) or _JD_MOBILE_RE.search(html)
                     if not m:
