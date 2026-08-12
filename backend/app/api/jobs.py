@@ -37,6 +37,32 @@ STATUS_LABEL_MAP = {
     "withdrawn": "已撤回",
 }
 
+# 岗位技能画像 —— 匹配度的评分基准。
+# 在 mock 的 KW_MAP 基础上补齐真实职位库里常见的方向；条目太少会导致
+# 分母不够、命中一个就满分，所以每个画像至少给 5 个技能。
+JOB_PROFILES = {
+    **KW_MAP,
+    "前端开发": ["Vue", "React", "JavaScript", "TypeScript", "CSS", "Webpack"],
+    "前端": ["Vue", "React", "JavaScript", "TypeScript", "CSS", "Webpack"],
+    "UI设计": ["Figma", "Sketch", "UI设计", "交互设计", "用户体验", "Axure"],
+    "UI": ["Figma", "Sketch", "UI设计", "交互设计", "用户体验", "Axure"],
+    "设计": ["Figma", "Sketch", "UI设计", "交互设计", "用户体验", "Axure"],
+    "算法": ["Python", "机器学习", "深度学习", "PyTorch", "TensorFlow", "数据结构"],
+    "人工智能": ["Python", "机器学习", "深度学习", "大模型", "PyTorch", "NLP"],
+    "大数据": ["Hadoop", "Spark", "Flink", "Hive", "SQL", "数据仓库"],
+    "运维": ["Linux", "Docker", "Kubernetes", "Shell", "Jenkins", "CI/CD"],
+    "iOS": ["Swift", "Objective-C", "iOS", "网络编程", "性能优化", "Git"],
+    "Android": ["Kotlin", "Java", "Android", "网络编程", "性能优化", "Git"],
+    "Python": ["Python", "Django", "Flask", "MySQL", "Redis", "SQL"],
+    "网络安全": ["网络安全", "Linux", "渗透测试", "TCP/IP", "Python", "应急响应"],
+    "项目经理": ["项目管理", "需求分析", "沟通能力", "团队协作", "敏捷开发", "Scrum"],
+    "市场营销": ["市场营销", "活动策划", "数据分析", "内容运营", "投放优化", "沟通能力"],
+    "销售": ["销售", "客户关系", "沟通能力", "谈判", "市场营销", "团队协作"],
+    "人力资源": ["招聘", "绩效管理", "员工关系", "沟通能力", "Excel", "组织发展"],
+    "财务": ["财务分析", "会计", "Excel", "预算管理", "税务", "审计"],
+}
+
+
 
 def _db_job_search(keyword: str = "", db: DBSession = None, limit: int = 60) -> list:
     """从 MySQL jobs 表搜索职位"""
@@ -98,7 +124,7 @@ def _calc_match(target_job: str, job: dict) -> dict:
 
     t = (target_job or "").lower()
     keywords = []
-    for k, v in KW_MAP.items():
+    for k, v in JOB_PROFILES.items():
         if k.lower() in t:
             keywords = v
             break
@@ -130,13 +156,22 @@ def _calc_match(target_job: str, job: dict) -> dict:
     missing = [r for r in requirements if not any(
         mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
 
-    if score >= 70:
+    # 关键词太少时分母不够，命中一个就是 100%，这种分数没有参考价值
+    # （比如目标写「UI设计」，iOS 岗的 JD 里提了一句 UI 设计就判高匹配）。
+    # 这种情况最多给到黄灯，不发绿灯误导用户投递。
+    thin_basis = len(keywords) < 3
+
+    if score >= 70 and not thin_basis:
         level = "green"
         reasons = f"岗位要求「{'、'.join(matched[:3])}」与你的技能高度匹配"
         missing = []
     elif score >= 40:
         level = "yellow"
-        reasons = f"匹配度中等，建议微调简历突出「{'、'.join(matched[:3])}」等技能"
+        if thin_basis and score >= 70:
+            reasons = (f"岗位提到「{'、'.join(matched[:3])}」，但目标岗位描述较笼统，"
+                       f"建议补充具体技能方向以获得更准确的匹配度")
+        else:
+            reasons = f"匹配度中等，建议微调简历突出「{'、'.join(matched[:3])}」等技能"
         missing = missing[:2]
     else:
         level = "red"
