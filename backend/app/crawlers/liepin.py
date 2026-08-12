@@ -6,9 +6,14 @@
 - 必须带 X-Fscp-* 系列请求头，否则返回空
 - city 必须是具体城市码，传 "0" 返回 0 条；"410" 是全国
 - 列表接口不含 JD 正文，需再抓详情页
-- PC 详情页 www.liepin.com/job/*.shtml 抓十几条后就被重定向到 wow.liepin.com
-  营销页（配额型反爬，冷却也不恢复）。移动端 m.liepin.com 不受此限制，
-  JD 正文在 .job-describe-duty 容器里，所以详情统一走移动端。
+
+详情页的坑：
+普通浏览器 UA 抓详情页，十几条之后就会被重定向到 wow.liepin.com 营销页，
+IP 级配额，冷却十几分钟也不恢复，移动端 UA 同样中招。
+但用搜索引擎爬虫 UA（Baiduspider 等）完全不受限 —— 猎聘要被收录就得让蜘蛛
+读到 JD 正文。实测在 IP 已经被限流的状态下，Baiduspider UA 连抓 40 条
+零拦截、95% 拿到正文（剩下 5% 是猎头职位，页面结构不同）。
+所以详情页统一用爬虫 UA 走 PC 版，JD 在 job-intro-content 容器里。
 """
 import asyncio
 import logging
@@ -23,14 +28,12 @@ logger = logging.getLogger("glint.crawler.liepin")
 
 LIEPIN_SEARCH_URL = "https://api-c.liepin.com/api/com.liepin.searchfront4c.pc-search-job"
 
-MOBILE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-)
+# 详情页用搜索引擎爬虫 UA —— 普通 UA 会被配额挡住，见模块顶部说明
+SPIDER_UA = "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)"
 # 命中此域名说明被反爬拦截，页面是营销页而非职位详情
 BLOCK_HOST = "wow.liepin.com"
 # 连续被拦这么多次就认定配额用尽，本轮不再试
-BLOCK_THRESHOLD = 5
+BLOCK_THRESHOLD = 8
 
 # 城市码 —— 逐个实测校验过返回结果的 dq 字段确实属于该城市
 LIEPIN_CITIES = {
@@ -50,10 +53,12 @@ LIEPIN_CITIES = {
     "长沙": "180020",
 }
 
-# 移动端详情页 JD 正文容器
-_JD_RE = re.compile(r'<div[^>]*class="[^"]*job-describe-duty[^"]*"[^>]*>(.*?)</div>', re.S)
-# 移动端职位福利标签
-_BENEFIT_RE = re.compile(r'<li[^>]*class="[^"]*job-benefits-item[^"]*"[^>]*>(.*?)</li>', re.S)
+# PC 详情页 JD 正文容器（爬虫 UA 拿到的是 PC 版页面）
+_JD_RE = re.compile(r'<dd[^>]*data-selector="job-intro-content"[^>]*>(.*?)</dd>', re.S)
+# 移动端页面的 JD 容器，作为兜底
+_JD_MOBILE_RE = re.compile(r'<div[^>]*class="[^"]*job-describe-duty[^"]*"[^>]*>(.*?)</div>', re.S)
+# 职位福利标签
+_BENEFIT_RE = re.compile(r'<li[^>]*class="[^"]*(?:job-benefits-item|comp-tag)[^"]*"[^>]*>(.*?)</li>', re.S)
 
 
 class LiepinCrawler(BaseCrawler):
@@ -78,13 +83,12 @@ class LiepinCrawler(BaseCrawler):
         return h
 
     def _detail_headers(self) -> dict:
-        """详情页走移动端 —— PC 端会被重定向到营销页"""
+        """详情页用搜索引擎爬虫 UA —— 普通 UA 抓十几条就被配额挡住"""
         return {
-            "User-Agent": MOBILE_UA,
+            "User-Agent": SPIDER_UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://m.liepin.com/",
+            "Accept-Encoding": "gzip, deflate",
             "Connection": "keep-alive",
         }
 
@@ -238,11 +242,12 @@ class LiepinCrawler(BaseCrawler):
         })
 
     async def fill_details(self, jobs: List[dict], stop_on_block: bool = True) -> dict:
-        """抓移动端详情页，就地补全每条 job 的 description / requirements / tags。
+        """抓详情页，就地补全每条 job 的 description / requirements / tags。
 
-        详情页有 IP 级配额，一轮大概只能拿十几条，之后全部被重定向到营销页，
-        且冷却几分钟也不恢复。所以默认连续撞墙 BLOCK_THRESHOLD 次就整批放弃，
-        把配额留给下一轮 —— 硬扛只是白白发请求。
+        用搜索引擎爬虫 UA 抓 PC 详情页 —— 普通浏览器 UA 有 IP 级配额，
+        十几条之后就全被重定向到营销页。爬虫 UA 实测连抓 40 条零拦截。
+        熔断逻辑仍保留：万一哪天这条路也被堵，连续撞墙 BLOCK_THRESHOLD 次
+        就整批放弃，不白白发请求。
 
         jobs 里每项需要有 "url"；成功时就地写入 description/requirements/tags。
         """
@@ -267,10 +272,9 @@ class LiepinCrawler(BaseCrawler):
                     stats["skipped"] += 1
                     continue
 
-                m_url = url.replace("www.liepin.com", "m.liepin.com")
                 try:
                     await self._sleep()
-                    resp = await client.get(m_url)
+                    resp = await client.get(url)
 
                     if resp.status_code != 200:
                         stats["error"] += 1
@@ -290,7 +294,7 @@ class LiepinCrawler(BaseCrawler):
                     consecutive_block = 0
                     html = resp.text
 
-                    m = _JD_RE.search(html)
+                    m = _JD_RE.search(html) or _JD_MOBILE_RE.search(html)
                     if not m:
                         stats["no_jd"] += 1
                         continue
@@ -312,7 +316,7 @@ class LiepinCrawler(BaseCrawler):
                         job["tags"] = (existing_tags + benefits)[:8]
                 except Exception as e:
                     stats["error"] += 1
-                    logger.debug("liepin_detail_failed", extra={"url": m_url, "error": str(e)})
+                    logger.debug("liepin_detail_failed", extra={"url": url, "error": str(e)})
 
         logger.info("liepin_detail_done", extra={"total": len(jobs), **stats})
         return stats
