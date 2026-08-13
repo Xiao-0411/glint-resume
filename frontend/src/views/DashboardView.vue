@@ -134,7 +134,7 @@
               </div>
 
               <!-- 缺失技能 -->
-              <div v-if="job.missingSkills.length > 0" class="missing-skills">
+              <div v-if="job.missingSkills?.length > 0" class="missing-skills">
                 <span class="missing-label">待补足技能</span>
                 <span v-for="sk in job.missingSkills" :key="sk" class="missing-tag">{{ sk }}</span>
               </div>
@@ -180,6 +180,19 @@
                     <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
                   </svg>
                   暂不建议投递
+                </button>
+                <!-- 匹配度无法评估（没有简历 / JD 未列明要求）：
+                     不做推荐，但也不能让这张卡片没有任何可操作项 -->
+                <button
+                  v-if="job.matchLevel === 'unknown'"
+                  class="action-btn secondary"
+                  @click="onApplyJob(job, 'original')"
+                  :disabled="appliedJobIds[job.id] || !hasResume"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+                  </svg>
+                  {{ appliedJobIds[job.id] ? '已投递' : (hasResume ? '仍要投递' : '请先创建简历') }}
                 </button>
               </div>
 
@@ -545,7 +558,7 @@
               匹配分析
             </h4>
             <div class="detail-reason">{{ detailJob.reasons }}</div>
-            <div v-if="detailJob.missingSkills.length > 0" class="detail-missing">
+            <div v-if="detailJob.missingSkills?.length > 0" class="detail-missing">
               <span class="detail-missing-label">待补足技能：</span>
               <span v-for="sk in detailJob.missingSkills" :key="sk" class="missing-tag">{{ sk }}</span>
             </div>
@@ -591,6 +604,18 @@
                 <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
               </svg>
               暂不建议投递
+            </button>
+            <!-- 匹配度无法评估时同样要给出可操作项，理由见列表页同名分支 -->
+            <button
+              v-if="detailLevel === 'unknown'"
+              class="action-btn secondary"
+              @click.stop="onApplyJob(detailJob, 'original')"
+              :disabled="appliedJobIds[detailJob.id] || !hasResume"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+              </svg>
+              {{ appliedJobIds[detailJob.id] ? '已投递' : (hasResume ? '仍要投递' : '请先创建简历') }}
             </button>
           </div>
         </div>
@@ -1188,6 +1213,7 @@ function crawlerStatusLabel(status) {
 .job-card.match-green { border-left: 4px solid #10B981; }
 .job-card.match-yellow { border-left: 4px solid #F59E0B; }
 .job-card.match-red { border-left: 4px solid #EF4444; }
+.job-card.match-unknown { border-left: 4px solid #D1D5DB; }
 
 .job-body { padding: 24px 28px; }
 

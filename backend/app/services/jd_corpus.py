@@ -146,6 +146,9 @@ def _job_search_terms(target_job: str) -> List[str]:
 
     "Java后端开发工程师" 要能召回标题含 "Java" 或 "后端" 的 JD。
     直接用整串 LIKE 匹配几乎召回不到东西 —— 这正是旧匹配度恒定的根因之一。
+
+    单字符词一律丢弃:"的""A" 这类词 LIKE '%的%' 会命中几乎所有 JD,
+    把无关岗位混进语料,统计出来的"岗位要求"就失真了。
     """
     if not target_job:
         return []
@@ -153,7 +156,7 @@ def _job_search_terms(target_job: str) -> List[str]:
     # 英文/数字片段(Java、C++、UI)
     for m in re.finditer(r"[A-Za-z][A-Za-z0-9+#.]*", target_job):
         token = m.group(0)
-        if len(token) >= 2 or token.upper() in ("C",):
+        if len(token) >= 2:
             terms.append(token)
     # 中文片段:去掉无区分度的通用后缀后,保留 2~4 字的核心词
     zh = re.sub(r"[A-Za-z0-9+#.\s]+", "", target_job)
@@ -163,14 +166,29 @@ def _job_search_terms(target_job: str) -> List[str]:
         # 附加前两字,提高召回("数据分析" -> 也检索 "数据")
         if len(zh) > 2:
             terms.append(zh[:2])
-    elif len(zh) == 1:
-        terms.append(zh)
     # 整串也作为一个检索词,精确匹配的 JD 相关性最高
-    if target_job.strip():
-        terms.insert(0, target_job.strip())
-    # 去重保序
+    whole = target_job.strip()
+    if len(whole) >= 2:
+        terms.insert(0, whole)
+    # 去重保序,并剔除过短的词
     seen = set()
-    return [t for t in terms if not (t.lower() in seen or seen.add(t.lower()))]
+    return [
+        t for t in terms
+        if len(t) >= 2 and not (t.lower() in seen or seen.add(t.lower()))
+    ]
+
+
+def _like_pattern(term: str) -> str:
+    """
+    构造 LIKE 模式,转义用户可控的通配符。
+
+    target_job 来自用户输入,若原样拼进 LIKE,"%" 会变成"匹配任意内容",
+    "_" 会变成"匹配任意单字符" —— 前者让检索退化为全表扫描,
+    后者让召回结果不可预期。参数本身仍由 SQLAlchemy 绑定,不存在注入,
+    但通配符语义必须显式转义掉。
+    """
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 def _fetch_jd_rows(db: DBSession, target_job: str) -> List[Job]:
@@ -179,7 +197,7 @@ def _fetch_jd_rows(db: DBSession, target_job: str) -> List[Job]:
     if not terms:
         return []
 
-    title_filters = [Job.title.like(f"%{t}%") for t in terms]
+    title_filters = [Job.title.like(_like_pattern(t), escape="\\") for t in terms]
     rows = (
         db.query(Job)
         .filter(Job.is_active == True, or_(*title_filters))
@@ -190,8 +208,8 @@ def _fetch_jd_rows(db: DBSession, target_job: str) -> List[Job]:
     if len(rows) >= MIN_CORPUS_SIZE:
         return rows
 
-    # 标题召回不足,放宽到描述//标签。相关性略低,但总好过没有数据。
-    broad_filters = [Job.description.like(f"%{t}%") for t in terms]
+    # 标题召回不足,放宽到描述。相关性略低,但总好过没有数据。
+    broad_filters = [Job.description.like(_like_pattern(t), escape="\\") for t in terms]
     extra = (
         db.query(Job)
         .filter(Job.is_active == True, or_(*broad_filters))
