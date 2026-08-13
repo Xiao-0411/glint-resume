@@ -26,8 +26,11 @@ _UNIT = (
 QUANT_WITH_UNIT = re.compile(rf"\d+\.?\d*\s*(?:{_UNIT})", re.IGNORECASE)
 
 # 成果型量化:提升/降低/减少 …… 数字,这类表述价值最高。
-# 分隔符类必须同时含中英文标点,否则 "显著提升，覆盖3个模块" 会被跨句误判为成果量化。
-_SEP = r",，。.;；、!！?？\s"
+# 分隔符类必须含中英文标点,否则 "显著提升，覆盖3个模块" 会被跨句误判为成果量化。
+# 注意:**不能**把空白字符算作分隔符 —— "耗时降低 65%" 是比 "耗时降低65%"
+# 更规范的排版,若把空格当断句,加个空格就从成果量化跌到普通量化(实测差 48 分)。
+# 用 [^,。;!?]{0,12} 限制跨度即可,句内空格照常允许。
+_SEP = r",，。.;；、!！?？"
 _DELTA_VERB = r"提升|提高|增长|增加|降低|减少|缩短|压缩|下降|优化|节省|加快|翻"
 QUANT_DELTA = re.compile(
     rf"(?:{_DELTA_VERB})[^{_SEP}]{{0,12}}?\d+\.?\d*\s*(?:{_UNIT})", re.IGNORECASE
@@ -40,6 +43,17 @@ QUANT_DELTA_REV = re.compile(
 # 排名型:前 10%、第 2 名、Top 3。
 # 排名单位是必需的 —— 否则 "第2组组长" 这种编号会被误判为量化成果。
 QUANT_RANK = re.compile(r"(?:前|第)\s*\d+\.?\d*\s*(?:%|名|位|强)|top\s*\d+", re.IGNORECASE)
+
+# 前后对比型:"从 800ms 优化至 120ms"、"从2000万降至200万"、"QPS 从 200 提升到 1200"。
+# 这是简历里最有说服力的写法之一,但两端数字未必都带量纲
+# (如 "QPS 从 200 提升至 1200",QPS 写在前面而不是作为单位跟在数字后),
+# 上面的 QUANT_DELTA 会漏掉。这里单独识别"从 A 到 B"结构:
+# 只要出现变化动词或"到/至"连接的两个数字,就认定为成果型量化。
+QUANT_RANGE = re.compile(
+    rf"从\s*\d+\.?\d*\s*(?:{_UNIT})?[^{_SEP}]{{0,6}}?"
+    rf"(?:到|至|降|升|增|减|优化|提升|下降|缩短)[^{_SEP}]{{0,6}}?\d+\.?\d*",
+    re.IGNORECASE,
+)
 
 # 模糊词 —— 出现即扣分,因为它们正是"假量化"的信号
 VAGUE_WORDS = (
@@ -174,11 +188,12 @@ def collect_bullets(resume: Dict) -> List[str]:
 def score_bullet_quant(bullet: str) -> float:
     """
     单条 bullet 的量化质量,0~1。
-    成果型量化(提升 30%) > 普通量化(5 人) > 排名 > 无。
+    成果型量化(提升 30% / 从 800ms 降到 120ms) > 普通量化(5 人) > 排名 > 无。
     模糊词扣分。
     """
     score = 0.0
-    if QUANT_DELTA.search(bullet) or QUANT_DELTA_REV.search(bullet):
+    if (QUANT_DELTA.search(bullet) or QUANT_DELTA_REV.search(bullet)
+            or QUANT_RANGE.search(bullet)):
         score = 1.0
     elif QUANT_WITH_UNIT.search(bullet):
         # 有量纲数字,但没体现变化量
@@ -198,7 +213,13 @@ def score_bullet_quant(bullet: str) -> float:
 def score_bullet_professional(bullet: str) -> float:
     """
     单条 bullet 的语言专业度,0~1。
-    看四件事:动词强度(是否在开头)、长度、第一人称、是否有交付物。
+    看五件事:动词强度(是否在开头)、长度、第一人称、因果结构、以及**言之有物**。
+
+    最后一项是补的漏:原实现只看句子的"外形"(开头动词 + 字数),
+    不看内容。于是 "主导设计行业领先的完美架构,显著提升性能,大幅优化体验"
+    这种纯堆砌形容词的句子能拿 0.80 —— 专业动词开头、字数刚好在黄金区间。
+    这等于教用户用套话刷分。现在:模糊词和夸大词按个扣分,
+    因为"专业"的反面不只是口语化,还包括空话。
     """
     if not bullet:
         return 0.0
@@ -238,6 +259,11 @@ def score_bullet_professional(bullet: str) -> float:
     # 弱动词出现在开头额外扣
     if any(bullet.startswith(v) for v in VERB_WEAK):
         score -= 0.15
+
+    # 空话惩罚:模糊词与夸大词都是"看着专业但没信息量"的典型。
+    # 每个模糊词 -0.15、每个夸大词 -0.2,堆砌形容词的句子会被明确压下去。
+    score -= 0.15 * sum(1 for w in VAGUE_WORDS if w in bullet)
+    score -= 0.2 * sum(1 for w in EXAGGERATION if w in bullet)
 
     return max(0.0, min(1.0, score))
 

@@ -1,11 +1,7 @@
 """
 智联招聘 爬虫
 """
-import asyncio
-import json
 import logging
-import random
-import re
 from typing import List, Optional
 
 from app.crawlers.base import BaseCrawler, JOB_KEYWORDS
@@ -153,23 +149,3 @@ class ZhaopinCrawler(BaseCrawler):
             "requirements": requirements,
             "url": ZHAOPIN_JOB_URL.format(job_id),
         })
-
-    def _extract_requirements(self, desc: str) -> List[str]:
-        if not desc:
-            return []
-        skill_patterns = [
-            "Java", "Python", "Go", "C\\+\\+", "JavaScript", "TypeScript", "Rust",
-            "Spring", "Django", "Flask", "Vue", "React", "Angular", "Node\\.js",
-            "MySQL", "Redis", "MongoDB", "PostgreSQL", "Elasticsearch", "Kafka",
-            "Docker", "Kubernetes", "Linux", "Git", "AWS", "Azure",
-            "产品设计", "需求分析", "用户研究", "数据分析", "项目管理",
-            "Figma", "Axure", "Sketch", "PRD", "SQL", "Excel",
-            "机器学习", "深度学习", "NLP", "CV", "TensorFlow", "PyTorch",
-            "自动化测试", "性能测试", "Selenium", "JMeter",
-            "UI设计", "交互设计", "用户体验",
-        ]
-        found = []
-        for pattern in skill_patterns:
-            if re.search(pattern, desc, re.IGNORECASE):
-                found.append(pattern.replace("\\", ""))
-        return found[:10]

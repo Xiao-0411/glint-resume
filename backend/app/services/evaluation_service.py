@@ -13,6 +13,8 @@ from typing import Dict, List, Tuple
 from app.core.prompts import QUALITY_LLM_PROMPT
 from app.services import llm_service
 from app.services.dialog_service import _strip_code_fence
+from app.services.jd_corpus import JobProfile, build_profile
+from app.services.job_match import extract_resume_skills
 from app.services.scoring_rules import (
     QUANT_WITH_UNIT,
     VERB_STRONG,
@@ -94,6 +96,12 @@ def _score_quantification(resume: Dict) -> Dict:
     量化度:bullets 里有多少真正可衡量的成果。
     旧实现只要句中有数字就算命中(Python3 也算),现在要求数字带量纲,
     并对"显著/大幅"这类假量化倒扣分。
+
+    计分不能是纯平均 —— 纯平均下"1 条硬成果 + 4 条平常描述"(52→10 分)
+    还不如只写那 1 条,等于在鼓励用户删经历。实际筛简历时 HR 看的是
+    "有没有拿得出手的成果",而不是"每句话是否都带数字"。
+    因此改为:平均质量(基本盘) + 硬成果的绝对条数(证据厚度),
+    两者加权。写得多但都平庸不会得高分,写得多且有几条硬成果则会。
     """
     bullets = collect_bullets(resume)
     if not bullets:
@@ -102,10 +110,14 @@ def _score_quantification(resume: Dict) -> Dict:
 
     per = [score_bullet_quant(b) for b in bullets]
     avg = sum(per) / len(per)
-    # 平均分是主体(80%),再给"高质量条目占比"20% 的奖励,
-    # 避免所有 bullet 都是 0.6 分的平庸简历和有几条硬成果的简历同分。
-    strong_ratio = sum(1 for p in per if p >= 0.8) / len(per)
-    score = int(round((avg * 0.8 + strong_ratio * 0.2) * 100))
+    # 硬成果条数:3 条即可拿满这一项,再多边际收益递减
+    strong_count = sum(1 for p in per if p >= 0.8)
+    depth = min(1.0, strong_count / 3)
+    # 平均质量占 55%,硬成果厚度占 45%。
+    # 单条硬成果简历(avg=1.0, depth=0.33)约 70 分;
+    # 同样 1 条硬成果 + 4 条平常(avg=0.2, depth=0.33)约 26 分 —— 仍有区分,
+    # 但不再像纯平均那样暴跌到 10 分。
+    score = int(round((avg * 0.55 + depth * 0.45) * 100))
     score = max(0, min(100, score))
 
     if score >= 80:
@@ -151,19 +163,73 @@ async def _score_professionalism_llm(resume: Dict) -> Dict:
         return {}
 
 
-def _score_match(resume: Dict, target_job: str) -> Dict:
+def _score_match(resume: Dict, target_job: str, profile: JobProfile = None) -> Dict:
     """
-    匹配度:目标岗位关键词在简历中的覆盖情况。
+    匹配度:简历是否具备目标岗位**真实要求**的技能。
 
-    旧实现按 [\\s/、,,]+ 切词,中文岗位名没有分隔符,
-    "Java后端开发工程师" 整体成为一个 token,几乎永远命中不了,
-    导致该维度恒为 60/70 分。现在用词典最长匹配 + 2-gram 兜底切词,
-    并区分"技能区命中"和"经历正文命中"——后者更有说服力。
+    两次演进:
+    1. 最早按 [\\s/、,,]+ 切岗位名,中文没有分隔符,"Java后端开发工程师"
+       整体成一个 token,几乎永不命中,该维度恒为 60/70 分。
+    2. 随后改为词典切词,但词典(JOB_LEXICON)是手写的岗位名词表,
+       衡量的其实是"简历里有没有出现岗位名里的字",而不是"会不会这个岗位要的技能"。
+       写"前端开发工程师"的简历只要多提几次"前端"就能拿高分。
+
+    现在以真实 JD 语料为准:profile 里的技能来自该岗位近期的招聘要求,
+    权重是它在多少条 JD 里出现过。简历覆盖了高频要求才算真的匹配。
+    语料不足时 profile 会自动降级为通用岗位模型(见 jd_corpus)。
     """
     job = (target_job or (resume.get("basic") or {}).get("target_job") or "").strip()
     if not job:
         return {"name": "匹配度", "score": 0, "max": 100, "desc": "未指定目标岗位,无法评估匹配度"}
 
+    if profile is None:
+        profile = build_profile(None, job)
+    # 岗位画像为空(冷启动且岗位名无法归类)时,退回到关键词覆盖的旧口径,
+    # 保证该维度不会因为没有语料就恒为 0。
+    if not profile.skill_weights:
+        return _score_match_by_keyword(resume, job)
+
+    resume_skills = extract_resume_skills(resume)
+    if resume_skills.is_empty:
+        return {"name": "匹配度", "score": 0, "max": 100,
+                "desc": f"简历中未识别到「{job}」相关的技能"}
+
+    total = 0.0
+    earned = 0.0
+    missing: List[tuple] = []
+    for skill, weight in profile.skill_weights.items():
+        total += weight
+        credit = resume_skills.credit_of(skill)
+        if credit > 0:
+            earned += weight * credit
+        else:
+            missing.append((skill, weight))
+
+    score = int(round((earned / total) * 100)) if total else 0
+    score = max(0, min(100, score))
+
+    missing.sort(key=lambda kv: -kv[1])
+    top_missing = "、".join(s for s, _ in missing[:3])
+    basis = f"近 {profile.sample_size} 条真实招聘要求" if profile.is_empirical else "通用岗位模型"
+
+    if score >= 75:
+        desc = f"已覆盖「{job}」{basis}中的主要技能"
+    elif score >= 45:
+        desc = f"对照「{job}」{basis},仍缺少「{top_missing}」"
+    elif score > 0:
+        desc = f"与「{job}」{basis}差距较大,建议优先补足「{top_missing}」"
+    else:
+        desc = f"简历中未体现「{job}」{basis}所要求的技能"
+    return {"name": "匹配度", "score": score, "max": 100, "desc": desc}
+
+
+def _score_match_by_keyword(resume: Dict, job: str) -> Dict:
+    """
+    冷启动兜底:没有任何岗位画像时,退回岗位名关键词覆盖度。
+
+    只在 jd_corpus 既无真实语料、也无法把岗位归入通用模型时触发
+    (例如"量子炼金术士"这类词表完全覆盖不到的岗位名)。
+    """
     keywords = tokenize_job(job)
     if not keywords:
         return {"name": "匹配度", "score": 0, "max": 100, "desc": "未能解析目标岗位关键词"}
@@ -175,10 +241,12 @@ def _score_match(resume: Dict, target_job: str) -> Dict:
         exp_text += " " + str(exp.get("role", "")).lower()
     skills = resume.get("skills") or {}
     skill_text = ""
+    skill_items = 0
     if isinstance(skills, dict):
         for group in skills.values():
             if isinstance(group, list):
                 skill_text += " " + " ".join(str(s) for s in group).lower()
+                skill_items += len(group)
 
     hit_exp = sum(1 for kw in keywords if kw in exp_text)
     hit_skill = sum(1 for kw in keywords if kw not in exp_text and kw in skill_text)
@@ -188,20 +256,12 @@ def _score_match(resume: Dict, target_job: str) -> Dict:
 
     # 覆盖率封顶 —— 岗位名切出的关键词很少时(如"前端开发"只有 1 个 token),
     # 命中一次就 100% 覆盖,该维度会退化成有/无二值。
-    # 关键词越少,单靠覆盖率能拿到的上限越低,剩余分数要靠"相关证据的厚度"补。
     cap = {0: 0.0, 1: 0.62, 2: 0.78, 3: 0.9}.get(len(keywords), 1.0)
     base = min(covered, cap)
 
     # 证据厚度:命中关键词在经历正文里出现的总次数,以及技能清单的相关广度。
-    # 反复出现说明是真的主线技能,而不是简历里蹭了一个词。
     depth_hits = sum(exp_text.count(kw) for kw in keywords if kw in exp_text)
-    depth = min(1.0, depth_hits / (len(keywords) * 3)) if keywords else 0.0
-    # 技能清单里与岗位相关的条目数
-    skill_items = 0
-    if isinstance(skills, dict):
-        for group in skills.values():
-            if isinstance(group, list):
-                skill_items += len(group)
+    depth = min(1.0, depth_hits / (len(keywords) * 3))
     breadth = min(1.0, skill_items / 6)
 
     ratio = base + (1 - base) * (depth * 0.6 + breadth * 0.4) if base > 0 else 0.0
@@ -282,9 +342,12 @@ def _resume_to_text(resume: Dict) -> str:
     return "\n".join(parts)
 
 
-async def evaluate_resume(resume: Dict, target_job: str = "") -> Dict:
+async def evaluate_resume(resume: Dict, target_job: str = "", db=None) -> Dict:
     """
     五维评分 + 亮点/改善 + 行动指南
+
+    db 传入时,匹配度会以该岗位的真实 JD 语料为标准;不传则退化为
+    通用岗位模型(见 jd_corpus.build_profile),不影响其余四个维度。
     """
     completeness = _score_completeness(resume)
     quantification = _score_quantification(resume)
@@ -316,7 +379,9 @@ async def evaluate_resume(resume: Dict, target_job: str = "") -> Dict:
         "name": "专业度", "score": prof_score, "max": 100, "desc": prof_desc
     }
 
-    match = _score_match(resume, target_job)
+    job_for_match = (target_job or (resume.get("basic") or {}).get("target_job") or "").strip()
+    profile = build_profile(db, job_for_match) if job_for_match else None
+    match = _score_match(resume, target_job, profile)
     credibility = _score_credibility(resume)
 
     dimensions = [completeness, quantification, professionalism, match, credibility]
@@ -368,6 +433,12 @@ async def evaluate_resume(resume: Dict, target_job: str = "") -> Dict:
         "highlights": highlights,
         "improvements": improvements,
         "action_guide": action_guide,
+        # 匹配度的评判依据,供前端如实展示"这个分是拿什么标准算的"
+        "match_basis": {
+            "targetJob": job_for_match,
+            "profileSource": profile.source if profile else "empty",
+            "sampleSize": profile.sample_size if profile else 0,
+        },
         "integrity_statement": (
             "本简历所有内容均基于你的真实对话生成,AI 仅做专业性重述与合理拔高,"
             "未编造任何不存在的经历。"

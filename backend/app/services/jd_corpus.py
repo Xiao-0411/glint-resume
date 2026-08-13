@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import or_
 from sqlalchemy.orm import Session as DBSession
 
+from app.core.database import SessionLocal
 from app.models.db_models import Job
 from app.services.skill_extract import canonicalize, extract_skills
 
@@ -224,8 +225,9 @@ def build_profile(db: Optional[DBSession], target_job: str) -> JobProfile:
     """
     构建目标岗位的需求画像。带进程内缓存。
 
-    db 为 None 或查询失败时降级到兜底画像 —— 评分接口不能因为
-    JD 语料不可用就整个失败。
+    db 为 None 时自建一个只读会话去查语料 —— 评分接口(resume/evaluate)
+    没有现成的 db 依赖,但同样应该按真实 JD 标准来评分,不能因为调用方
+    没传 session 就退化成兜底词表。取不到语料时静默降级,不影响主流程。
     """
     job = (target_job or "").strip()
     if not job:
@@ -237,30 +239,36 @@ def build_profile(db: Optional[DBSession], target_job: str) -> JobProfile:
         return cached[0]
 
     profile = _starter_profile(job)
-    if db is not None:
-        try:
-            rows = _fetch_jd_rows(db, job)
-            if len(rows) >= MIN_CORPUS_SIZE:
-                counter: Dict[str, int] = {}
-                for row in rows:
-                    # 同一条 JD 里重复出现的技能只算一次 —— 统计的是
-                    # "多少条 JD 要求它",不是"被提及多少次"
-                    for skill in set(_skills_of_job(row)):
-                        counter[skill] = counter.get(skill, 0) + 1
-                if counter:
-                    total = len(rows)
-                    profile = JobProfile(
-                        target_job=job,
-                        skill_weights={s: c / total for s, c in counter.items()},
-                        sample_size=total,
-                        source="jd",
-                    )
-        except Exception as exc:
-            # 语料构建失败不能影响主流程,降级即可
-            logger.warning(
-                "jd_profile_build_failed",
-                extra={"target_job": job, "error": str(exc)},
-            )
+    own_session = None
+    try:
+        if db is None:
+            own_session = SessionLocal()
+            db = own_session
+        rows = _fetch_jd_rows(db, job)
+        if len(rows) >= MIN_CORPUS_SIZE:
+            counter: Dict[str, int] = {}
+            for row in rows:
+                # 同一条 JD 里重复出现的技能只算一次 —— 统计的是
+                # "多少条 JD 要求它",不是"被提及多少次"
+                for skill in set(_skills_of_job(row)):
+                    counter[skill] = counter.get(skill, 0) + 1
+            if counter:
+                total = len(rows)
+                profile = JobProfile(
+                    target_job=job,
+                    skill_weights={s: c / total for s, c in counter.items()},
+                    sample_size=total,
+                    source="jd",
+                )
+    except Exception as exc:
+        # 语料构建失败不能影响主流程,降级即可
+        logger.warning(
+            "jd_profile_build_failed",
+            extra={"target_job": job, "error": str(exc)},
+        )
+    finally:
+        if own_session is not None:
+            own_session.close()
 
     _CACHE[cache_key] = (profile, _now())
     return profile

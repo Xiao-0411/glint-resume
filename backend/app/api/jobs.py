@@ -6,10 +6,14 @@ GET  /api/jobs/applications  ——  获取投递列表（从 DB 读取）
 POST /api/jobs/applications/status  ——  更新投递状态（持久化）
 
 职位数据来自爬虫库（jobs 表）；库为空时按关键词实时抓取，不返回 mock 职位。
+
+匹配度基于用户**真实简历**与 JD 的技能比对，技能权重取自真实 JD 语料的
+市场频率（见 services/job_match.py 与 services/jd_corpus.py）。
 """
 import datetime
 import uuid
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_
@@ -21,11 +25,13 @@ from app.models.db_models import Application, Job, User, CrawlerStatus
 from app.models.schemas import (
     JobSearchRequest, JobAdaptRequest, JobApplyRequest, ApplicationStatusRequest
 )
-from app.mock.fallback import (
-    mock_adapt_resume, mock_apply_job,
-    KW_MAP,
-)
+from app.mock.fallback import mock_adapt_resume, mock_apply_job
+from app.services.jd_corpus import build_profile
+from app.services.job_match import rank_jobs
+from app.store.db_store import session_store
 from app.crawlers.scheduler import crawl_keyword
+
+logger = logging.getLogger("glint.jobs")
 
 router = APIRouter()
 
@@ -100,81 +106,31 @@ def _db_job_search(keyword: str = "", db: DBSession = None, limit: int = 60) -> 
     return results
 
 
-def _calc_match(target_job: str, job: dict) -> dict:
-    """计算岗位匹配度"""
-    t = (target_job or "").lower()
-    keywords = []
-    for k, v in KW_MAP.items():
-        if k.lower() in t:
-            keywords = v
-            break
-    if not keywords:
-        keywords = job["requirements"][:4] if job["requirements"] else []
-
-    requirements = job.get("requirements", [])
-    if not requirements:
-        return {"score": 50, "matched_keywords": [], "level": "yellow", "missing": [], "reasons": "匹配度未知"}
-
-    match_count = 0
-    matched = []
-    for req in requirements:
-        for kw in keywords:
-            if kw.lower() in req.lower() or req.lower() in kw.lower():
-                match_count += 1
-                matched.append(kw)
-                break
-
-    score = round((match_count / len(requirements)) * 100) if requirements else 50
-
-    if score >= 85:
-        level, reasons = "green", f"岗位要求「{'、'.join(matched[:3])}」与你的技能高度匹配"
-        missing = []
-    elif score >= 60:
-        missing = [r for r in requirements if not any(
-            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
-        reasons = f"匹配度中等，建议微调简历突出「{'、'.join(matched)}」等技能"
-        missing = missing[:2]
-        level = "yellow"
-    else:
-        missing = [r for r in requirements if not any(
-            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
-        reasons = f"核心技能「{'、'.join(missing[:3])}」暂不匹配，建议先补足再投递"
-        missing = missing[:3]
-        level = "red"
-
-    return {
-        "score": score,
-        "matched_keywords": matched,
-        "level": level,
-        "missing": missing,
-        "reasons": reasons,
-    }
+def _load_user_resume(user_id: str) -> dict:
+    """取用户最新一份简历用于匹配。取不到就返回空 dict —— 由匹配层给出
+    "尚未生成简历"的明确结论，而不是编一个分数出来。"""
+    try:
+        latest = session_store.get_latest_resume_for_user(user_id)
+    except Exception as exc:
+        logger.warning("load_resume_for_match_failed", extra={"user_id": user_id, "error": str(exc)})
+        return {}
+    return (latest or {}).get("resume") or {}
 
 
 @router.post("/jobs/search")
 async def job_search(req: JobSearchRequest, current_user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    """搜索真实职位。库为空时按当前关键词触发一次实时抓取，不返回 mock 职位。"""
+    """搜索真实职位。库为空时按当前关键词触发一次实时抓取，不返回 mock 职位。
+
+    匹配度用用户最新简历与 JD 比对得出，因此同一岗位下不同用户分数不同。
+    """
     keyword = req.keyword or req.target_job or ""
+    resume = _load_user_resume(current_user.id)
+    target_job = req.target_job or keyword
 
-    # 优先从数据库读取
     db_jobs = _db_job_search(keyword=keyword, db=db)
+    source = "db"
 
-    if db_jobs:
-        # 用真实数据做匹配分级
-        matched = []
-        for job in db_jobs:
-            m = _calc_match(req.target_job or keyword, job)
-            matched.append({
-                **job,
-                "matchScore": m["score"],
-                "matchLevel": m["level"],
-                "reasons": m["reasons"],
-                "missingSkills": m["missing"],
-            })
-        matched.sort(key=lambda x: x["matchScore"], reverse=True)
-        return {"jobs": matched, "total": len(matched), "source": "db"}
-
-    if keyword:
+    if not db_jobs and keyword:
         try:
             await asyncio.wait_for(crawl_keyword(keyword), timeout=35)
         except asyncio.TimeoutError:
@@ -186,21 +142,25 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
         # REPEATABLE READ 快照看不到刚提交的职位。
         db.rollback()
         db_jobs = _db_job_search(keyword=keyword, db=db)
-        if db_jobs:
-            matched = []
-            for job in db_jobs:
-                m = _calc_match(req.target_job or keyword, job)
-                matched.append({
-                    **job,
-                    "matchScore": m["score"],
-                    "matchLevel": m["level"],
-                    "reasons": m["reasons"],
-                    "missingSkills": m["missing"],
-                })
-            matched.sort(key=lambda x: x["matchScore"], reverse=True)
-            return {"jobs": matched, "total": len(matched), "source": "live"}
+        source = "live"
 
-    return {"jobs": [], "total": 0, "source": "empty", "message": "暂无匹配的真实职位，请更换关键词后重试"}
+    if not db_jobs:
+        return {"jobs": [], "total": 0, "source": "empty", "message": "暂无匹配的真实职位，请更换关键词后重试"}
+
+    profile = build_profile(db, target_job)
+    matched = rank_jobs(resume, db_jobs, profile)
+    return {
+        "jobs": matched,
+        "total": len(matched),
+        "source": source,
+        # 让前端能如实说明匹配依据，而不是笼统写"与你的简历匹配"
+        "matchBasis": {
+            "hasResume": bool(resume),
+            "profileSource": profile.source,
+            "sampleSize": profile.sample_size,
+            "targetJob": target_job,
+        },
+    }
 
 
 @router.post("/jobs/adapt")

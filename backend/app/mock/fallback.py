@@ -345,6 +345,9 @@ JOB_DATABASE = [
     {"id": "job_020", "title": "Python爬虫工程师", "company": "汽车之家", "salary": "12-18K", "location": "上海", "tags": ["中厂", "急招"], "description": "负责汽车之家数据采集平台的开发和维护。要求：精通Python爬虫相关库，了解反爬机制。", "requirements": ["Python", "Scrapy", "反爬对抗", "MySQL", "MongoDB"]},
 ]
 
+# 仅供 mock_adapt_resume 演示用的岗位技能表。
+# 真实的匹配度一律走 services/job_match + services/jd_corpus(基于真实 JD 语料),
+# 不要再从这里取岗位标准 —— 手写词表覆盖不全且会过期。
 KW_MAP = {
     "产品经理": ["产品思维", "需求分析", "Figma", "PRD撰写", "用户调研", "数据分析", "原型设计"],
     "产品": ["产品思维", "需求分析", "Figma", "PRD撰写", "用户调研", "数据分析", "原型设计"],
@@ -379,51 +382,6 @@ def _calc_match(target_job: str, job: dict) -> dict:
 
     score = round((match_count / len(job["requirements"])) * 100) if job["requirements"] else 50
     return {"score": score, "matched_keywords": matched}
-
-
-def mock_job_search(keyword: str = "", target_job: str = "") -> dict:
-    import time
-    kw = (keyword or target_job or "").lower()
-    if not kw or len(kw) < 2:
-        results = JOB_DATABASE[:12]
-    else:
-        results = [j for j in JOB_DATABASE if
-                   kw in j["title"].lower() or kw in j["company"].lower() or
-                   any(kw in t for t in j["tags"]) or
-                   any(kw in r.lower() for r in j["requirements"])]
-        if not results:
-            results = JOB_DATABASE[:8]
-
-    matched = []
-    for job in results:
-        m = _calc_match(target_job or keyword, job)
-        score = m["score"]
-        if score >= 85:
-            level, reasons = "green", f"岗位要求「{'、'.join(m['matched_keywords'][:3])}」与你的技能高度匹配"
-            missing = []
-        elif score >= 60:
-            missing = [r for r in job["requirements"] if not any(
-                mk.lower() in r.lower() or r.lower() in mk.lower() for mk in m["matched_keywords"])]
-            reasons = f"匹配度中等，建议微调简历突出「{'、'.join(m['matched_keywords'])}」等技能"
-            missing = missing[:2]
-            level = "yellow"
-        else:
-            missing = [r for r in job["requirements"] if not any(
-                mk.lower() in r.lower() or r.lower() in mk.lower() for mk in m["matched_keywords"])]
-            reasons = f"核心技能「{'、'.join(missing[:3])}」暂不匹配，建议先补足再投递"
-            missing = missing[:3]
-            level = "red"
-
-        matched.append({
-            **job,
-            "matchScore": score,
-            "matchLevel": level,
-            "reasons": reasons,
-            "missingSkills": missing
-        })
-
-    matched.sort(key=lambda x: x["matchScore"], reverse=True)
-    return {"jobs": matched, "total": len(matched)}
 
 
 def _build_resume_diff(original: dict, adapted: dict, job: dict) -> list:

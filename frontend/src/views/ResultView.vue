@@ -245,6 +245,7 @@ import ExperienceEditDialog from '@/components/ExperienceEditDialog.vue'
 import ReEvaluateDialog from '@/components/ReEvaluateDialog.vue'
 import { resumeApi, sessionApi } from '@/api'
 import { downloadResumePdf } from '@/api/backend'
+import { scoreLevel, gradeGapText as computeGradeGap } from '@/utils/grading'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { RadarChart } from 'echarts/charts'
@@ -274,20 +275,8 @@ const lastEditedTitle = ref('')
 const resume = computed(() => store.resumeData)
 const report = computed(() => store.qualityReport)
 
-// 距下一档还差多少分。阈值与后端 evaluation_service._grade_of 对应,
-// 已是最高档时不再显示"距卓越还差 N 分"。
-const gradeGapText = computed(() => {
-  const score = report.value?.total_score
-  if (typeof score !== 'number') return ''
-  const tiers = [
-    { min: 82, label: '卓越' },
-    { min: 68, label: '优秀' },
-    { min: 52, label: '良好' },
-    { min: 35, label: '合格' },
-  ]
-  const next = [...tiers].reverse().find((t) => score < t.min)
-  return next ? ` · 距${next.label}还差 ${next.min - score} 分` : ''
-})
+// 距下一档还差多少分。阈值统一由 utils/grading 定义(与后端 _grade_of 对齐)
+const gradeGapText = computed(() => computeGradeGap(report.value?.total_score))
 
 const topDimensions = computed(() => {
   if (!report.value?.dimensions) return []
@@ -611,14 +600,6 @@ function copyText(text, key) {
       copyTimer = null
     }, 1800)
   }
-}
-
-function scoreLevel(score) {
-  // 阈值与后端 evaluation_service._grade_of 保持一致
-  if (score >= 82) return 'excellent'
-  if (score >= 68) return 'good'
-  if (score >= 52) return 'pass'
-  return 'warn'
 }
 
 function onPrint() {

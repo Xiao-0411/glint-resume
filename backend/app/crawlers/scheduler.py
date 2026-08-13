@@ -12,6 +12,7 @@ from sqlalchemy import and_
 
 from app.core.database import SessionLocal, init_db
 from app.models.db_models import Job, CrawlerStatus
+from app.crawlers.base import JOB_KEYWORDS
 from app.crawlers.zhipin import ZhipinCrawler
 from app.crawlers.zhaopin import ZhaopinCrawler
 from app.crawlers.liepin import LiepinCrawler

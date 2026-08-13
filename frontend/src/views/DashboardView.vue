@@ -54,6 +54,9 @@
           <span class="legend-item"><span class="dot red"></span>低匹配 暂不建议</span>
         </div>
 
+        <!-- 匹配依据：如实说明分数怎么来的，不含糊其辞 -->
+        <div v-if="matchBasisText" class="match-basis">{{ matchBasisText }}</div>
+
         <div v-if="crawlerStatuses.length" class="crawler-status-bar">
           <span class="crawler-status-title">数据渠道</span>
           <span v-for="item in crawlerStatuses" :key="item.platform" class="crawler-status-item">
@@ -110,8 +113,7 @@
                 <div class="job-top-right">
                   <span :class="['match-tag', job.matchLevel]">
                     <span class="match-dot"></span>
-                    {{ job.matchLevel === 'green' ? '高匹配' : job.matchLevel === 'yellow' ? '中匹配' : '低匹配' }}
-                    {{ job.matchScore }}%
+                    {{ matchLabel(job) }}
                   </span>
                   <span class="job-salary">{{ job.salary }}</span>
                 </div>
@@ -415,62 +417,6 @@
           <p class="empty-text">请先在「简历锻造」中生成简历</p>
         </div>
 
-        <!-- 质量-转化关联分析 -->
-        <div class="qa-section">
-          <h3 class="qa-section-title">简历质量与投递转化关联分析</h3>
-          <p class="qa-section-sub">基于行业大数据，简历质量分每提升10分，筛选通过率平均提升20%以上</p>
-          <div class="qa-correlation-grid">
-            <div class="qa-cor-card">
-              <div class="cor-icon-wrap low">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </div>
-              <div class="cor-header">
-                <span class="cor-label">低分段 60-70分</span>
-                <span class="cor-estimate">预计通过率</span>
-              </div>
-              <div class="cor-bar-wrap">
-                <div class="cor-bar low" style="width: 15%"></div>
-                <span class="cor-pct">~15%</span>
-              </div>
-              <p class="cor-desc">简历完整度和量化度不足，关键词命中率低，HR 难以快速抓取有效信息。</p>
-            </div>
-            <div class="qa-cor-card">
-              <div class="cor-icon-wrap mid">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                </svg>
-              </div>
-              <div class="cor-header">
-                <span class="cor-label">中分段 70-80分</span>
-                <span class="cor-estimate">预计通过率</span>
-              </div>
-              <div class="cor-bar-wrap">
-                <div class="cor-bar mid" style="width: 35%"></div>
-                <span class="cor-pct">~35%</span>
-              </div>
-              <p class="cor-desc">结构完整，关键词匹配仍有优化空间，建议使用 AI 微调适配功能。</p>
-            </div>
-            <div class="qa-cor-card">
-              <div class="cor-icon-wrap high">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-                </svg>
-              </div>
-              <div class="cor-header">
-                <span class="cor-label">高分段 80-90分</span>
-                <span class="cor-estimate">预计通过率</span>
-              </div>
-              <div class="cor-bar-wrap">
-                <div class="cor-bar high" style="width: 60%"></div>
-                <span class="cor-pct">~60%</span>
-              </div>
-              <p class="cor-desc">专业度高、成果量化充分，关键词与 JD 对齐良好，通过概率显著提升。</p>
-            </div>
-          </div>
-        </div>
-
         <!-- 当前投递数据分析 -->
         <div class="qa-section" v-if="huntStore.applications.length > 0">
           <h3 class="qa-section-title">你的投递数据</h3>
@@ -499,75 +445,45 @@
               <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
             </svg>
             <div class="qa-insight-text">
-              <strong>AI 分析建议：</strong>
+              <strong>分析建议：</strong>
               当前简历质量分为
-              <strong style="font-size: 1.1rem; color: var(--color-primary);">{{ chatStore.qualityReport?.total_score || '--' }}</strong> 分。
-              <template v-if="chatStore.qualityReport?.total_score < 70">
-                低于建议投递线 (70分)，建议先在「简历锻造」中优化简历质量再加大投递量。
+              <strong style="font-size: 1.1rem; color: var(--color-primary);">{{ chatStore.qualityReport?.total_score ?? '--' }}</strong> 分（{{ chatStore.qualityReport?.grade || '未评估' }}）。
+              <template v-if="chatStore.qualityReport?.total_score < 52">
+                建议先回到「简历锻造」补齐经历与量化成果，再加大投递量。
               </template>
-              <template v-else-if="chatStore.qualityReport?.total_score < 80">
-                处于中等水平，建议针对黄色岗位使用 AI 微调适配功能，可有效提升筛选通过率。
+              <template v-else-if="chatStore.qualityReport?.total_score < 68">
+                已具备基本竞争力，建议针对中匹配岗位使用 AI 微调适配，补足 JD 要求的关键技能。
               </template>
               <template v-else>
-                处于高分段，筛选通过率预计 50% 以上，建议主动投递绿色岗位并关注面试准备。
+                简历质量良好，建议优先投递高匹配岗位，并着手准备面试。
               </template>
             </div>
           </div>
         </div>
 
-        <!-- 技能缺口分析 -->
-        <div class="qa-section">
+        <!-- 技能缺口分析：统计自本次搜索到的真实 JD，不含预设内容 -->
+        <div class="qa-section" v-if="skillGaps.length > 0">
           <h3 class="qa-section-title">技能补足建议</h3>
-          <p class="qa-section-sub">根据岗位 JD 要求，以下是需要关注的能力提升方向</p>
+          <p class="qa-section-sub">
+            统计自本次搜索到的 {{ huntStore.matchedJobs.length }} 个真实职位，以下技能被要求最多但你的简历中尚未体现
+          </p>
           <div class="qa-skill-gaps">
-            <div class="gap-card">
-              <div class="gap-icon-wrap">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
-                </svg>
-              </div>
-              <div class="gap-info">
-                <div class="gap-name">SQL 数据分析</div>
-                <div class="gap-reason">5 个岗位 JD 中出现，但你的简历中未体现</div>
-                <div class="gap-action">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="9 18 15 12 9 6"/>
-                  </svg>
-                  建议完成 "SQL for Data Analysis" 课程（约15小时），完成后简历质量分预计提升 8 分
-                </div>
-              </div>
-            </div>
-            <div class="gap-card">
-              <div class="gap-icon-wrap">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-                </svg>
-              </div>
-              <div class="gap-info">
-                <div class="gap-name">Figma 原型设计</div>
-                <div class="gap-reason">3 个产品岗位要求，当前仅在技能列表中提及</div>
-                <div class="gap-action">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="9 18 15 12 9 6"/>
-                  </svg>
-                  建议在经历中添加一段使用 Figma 的实践案例，完成后匹配度预计提升 6 分
-                </div>
-              </div>
-            </div>
-            <div class="gap-card">
+            <div class="gap-card" v-for="gap in skillGaps" :key="gap.skill">
               <div class="gap-icon-wrap">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
                 </svg>
               </div>
               <div class="gap-info">
-                <div class="gap-name">项目经历量化度</div>
-                <div class="gap-reason">经历「校学生会信息中心」中"阅读量提升 40%"可进一步细化</div>
+                <div class="gap-name">{{ gap.skill }}</div>
+                <div class="gap-reason">
+                  {{ gap.count }} / {{ huntStore.matchedJobs.length }} 个职位要求，你的简历中未体现
+                </div>
                 <div class="gap-action">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="9 18 15 12 9 6"/>
                   </svg>
-                  补充更多具体数字（参与人数、覆盖范围、具体成果），量化度预计提升 10 分
+                  在经历中补充一段使用「{{ gap.skill }}」的实践，并写出可量化的成果
                 </div>
               </div>
             </div>
@@ -595,8 +511,7 @@
             <span class="detail-salary">{{ detailJob.salary }}</span>
             <span :class="['match-tag', detailLevel]">
               <span class="match-dot"></span>
-              {{ detailLevel === 'green' ? '高匹配' : detailLevel === 'yellow' ? '中匹配' : '低匹配' }}
-              {{ detailJob.matchScore }}%
+              {{ matchLabel({ matchLevel: detailLevel, matchScore: detailJob.matchScore }) }}
             </span>
           </div>
         </div>
@@ -701,7 +616,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
             </svg>
-            <span>此岗位与你的简历高度匹配，无需修改即可直接投递</span>
+            <span>你的简历已覆盖该岗位的主要技能要求，无需修改即可直接投递</span>
           </div>
 
           <!-- 图例（仅适配场景显示） -->
@@ -829,6 +744,42 @@ const searchKeyword = ref('')
 const searchMessage = ref('输入关键词搜索真实职位，结果来自招聘平台实时数据')
 const crawlerStatuses = ref([])
 const appliedJobIds = reactive({})
+// 后端返回的匹配依据：是否用到了简历、岗位画像来自真实 JD 还是兜底词表
+const matchBasis = ref(null)
+
+// 匹配标签文案。后端在"没有简历"或"JD 未列明要求"时返回 null 分数，
+// 此时不能显示 "0%" 或凭空给一个数 —— 如实说明无法评估。
+function matchLabel(job) {
+  if (job.matchScore === null || job.matchScore === undefined) return '匹配度未知'
+  const level = { green: '高匹配', yellow: '中匹配', red: '低匹配' }[job.matchLevel] || '匹配度'
+  return `${level} ${job.matchScore}%`
+}
+
+// 如实告知匹配分怎么算出来的，避免 UI 宣称"基于你的简历"而实际并非如此
+const matchBasisText = computed(() => {
+  const b = matchBasis.value
+  if (!b) return ''
+  if (!b.hasResume) return '尚未生成简历，暂时无法计算匹配度。创建简历后即可看到与各岗位的真实匹配情况。'
+  if (b.profileSource === 'jd' && b.sampleSize) {
+    return `匹配度 = 你的简历技能 × 「${b.targetJob}」近期 ${b.sampleSize} 条真实招聘要求（越多岗位要求的技能，权重越高）`
+  }
+  return `匹配度 = 你的简历技能 × 该职位列明的技能要求（「${b.targetJob}」的真实 JD 样本不足，暂用通用岗位模型）`
+})
+
+// 技能缺口：统计本次搜索结果里被最多职位要求、而简历未覆盖的技能。
+// 数据全部来自后端返回的 missingSkills，不含任何预设示例。
+const skillGaps = computed(() => {
+  const counter = new Map()
+  for (const job of huntStore.matchedJobs) {
+    for (const skill of job.missingSkills || []) {
+      counter.set(skill, (counter.get(skill) || 0) + 1)
+    }
+  }
+  return [...counter.entries()]
+    .map(([skill, count]) => ({ skill, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6)
+})
 
 // 职位详情整页
 const detailJob = ref(null)
@@ -922,6 +873,7 @@ async function onSearch() {
       targetJob: chatStore.targetJob
     })
     huntStore.setMatchedJobs(result.jobs || [])
+    matchBasis.value = result.matchBasis || null
     searchMessage.value = result.message || (result.source === 'live_unavailable'
       ? '实时职位暂时不可用，请稍后重试'
       : '暂无匹配的真实职位，请更换关键词后重试')
@@ -1291,6 +1243,13 @@ function crawlerStatusLabel(status) {
 .match-tag.green { background: #D1FAE5; color: #059669; }
 .match-tag.yellow { background: #FEF3C7; color: #D97706; }
 .match-tag.red { background: #FEE2E2; color: #DC2626; }
+.match-tag.unknown { background: #F3F4F6; color: #6B7280; }
+.match-basis {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary, #6B7280);
+}
 .match-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -1608,61 +1567,6 @@ function crawlerStatusLabel(status) {
   margin-bottom: 18px;
   line-height: 1.6;
 }
-
-.qa-correlation-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 18px;
-}
-.qa-cor-card {
-  background: var(--color-bg-card);
-  border-radius: var(--radius-xl);
-  padding: 24px;
-  border: 1px solid var(--color-border-light);
-  transition: all 0.3s var(--ease-out);
-  box-shadow: var(--shadow-xs);
-}
-.qa-cor-card:hover {
-  box-shadow: var(--shadow-md);
-  transform: translateY(-2px);
-}
-
-.cor-icon-wrap {
-  width: 48px; height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  margin-bottom: 14px;
-}
-.cor-icon-wrap.low { background: var(--color-danger-soft); color: var(--color-danger); }
-.cor-icon-wrap.mid { background: var(--color-warning-soft); color: var(--color-warning); }
-.cor-icon-wrap.high { background: var(--color-success-soft); color: var(--color-success); }
-
-.cor-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-.cor-label { font-size: 1.05rem; font-weight: 700; color: var(--color-text); }
-.cor-estimate { font-size: 0.85rem; color: var(--color-text-muted); font-weight: 500; }
-.cor-bar-wrap {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.cor-bar {
-  height: 10px;
-  border-radius: 5px;
-  transition: width 0.8s var(--ease-out);
-}
-.cor-bar.low { background: #EF4444; }
-.cor-bar.mid { background: #F59E0B; }
-.cor-bar.high { background: #10B981; }
-.cor-pct { font-size: 1.15rem; font-weight: 800; }
-.cor-desc { font-size: 0.92rem; color: var(--color-text-muted); line-height: 1.65; }
 
 .qa-data-row {
   display: grid;

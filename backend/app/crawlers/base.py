@@ -9,6 +9,8 @@ from typing import List, Optional
 
 import httpx
 
+from app.services.skill_extract import extract_skills
+
 logger = logging.getLogger("glint.crawler")
 
 # 常用 User-Agent 池
@@ -79,6 +81,16 @@ class BaseCrawler(ABC):
     async def crawl(self, keywords: List[str] = None) -> List[dict]:
         """抓取职位列表，返回标准化 dict 列表"""
         ...
+
+    def _extract_requirements(self, desc: str) -> List[str]:
+        """从职位描述中提取技能要求。
+
+        三个平台原先各有一份几乎相同的实现，且都用裸正则匹配，
+        导致 "PostgreSQL" 命中 SQL、"Golang" 命中 Go。统一收敛到
+        services/skill_extract，词表和边界规则只维护一处，
+        抽出的技能名也与简历侧归一到同一套规范名，才能正确比对。
+        """
+        return extract_skills(desc, limit=10)
 
     def normalize_job(self, raw: dict) -> dict:
         """标准化为统一格式：

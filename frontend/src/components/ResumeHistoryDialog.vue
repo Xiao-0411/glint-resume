@@ -29,7 +29,7 @@
       <!-- 列表 -->
       <div v-else class="hist-list">
         <div v-for="item in auth.resumeHistory" :key="item.id" class="hist-item" @click="openItem(item)">
-          <div class="hist-score" :style="{ color: item.gradeColor || scoreColor(item.score) }">
+          <div class="hist-score" :style="{ color: scoreColor(item.score, item.gradeColor) }">
             <span class="hist-score-num">{{ item.score ?? '--' }}</span>
             <span class="hist-score-cap">分</span>
           </div>
@@ -62,6 +62,7 @@ import { NModal } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useChatStore } from '@/stores/chat'
+import { scoreColor } from '@/utils/grading'
 
 defineProps({ show: { type: Boolean, default: false } })
 const emit = defineEmits(['update:show'])
@@ -89,14 +90,6 @@ function sourceClass(source) {
   if (source === 'upload' || source === 'upload_mock') return 'upload'
   if (source === 'edit' || source === 'edit_mock') return 'edit'
   return 'chat'
-}
-
-function scoreColor(score) {
-  if (score == null) return 'var(--color-text-muted)'
-  if (score >= 85) return 'var(--color-success)'
-  if (score >= 70) return 'var(--color-primary)'
-  if (score >= 60) return 'var(--color-warning)'
-  return 'var(--color-danger)'
 }
 
 function formatDate(ts) {
