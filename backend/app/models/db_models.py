@@ -165,3 +165,19 @@ class Job(Base):
     crawled_at = Column(DateTime, default=_now, comment="抓取时间")
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class CrawlerStatus(Base):
+    """各招聘平台最近一次抓取状态，用于运营监控。"""
+    __tablename__ = "crawler_status"
+
+    platform = Column(String(32), primary_key=True)
+    status = Column(String(32), nullable=False, default="never")
+    last_started_at = Column(DateTime, nullable=True)
+    last_finished_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_job_count = Column(Integer, default=0)
+    last_saved_count = Column(Integer, default=0)
+    last_duration_ms = Column(Integer, default=0)
+    last_error = Column(Text, default="")
+    updated_at = Column(DateTime, default=_now, onupdate=_now)

@@ -303,6 +303,11 @@ export async function jobSearch(payload) {
   return data
 }
 
+export async function getCrawlerStatus() {
+  const { data } = await http.get('/api/jobs/crawler-status')
+  return data
+}
+
 /**
  * 简历适配
  */

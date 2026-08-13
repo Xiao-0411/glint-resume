@@ -63,9 +63,17 @@ class BaseCrawler(ABC):
         client = await self._get_client()
         delay = random.uniform(1.5, 4.0)
         await asyncio.sleep(delay)
-        resp = await client.get(url, **kwargs)
-        resp.raise_for_status()
-        return resp
+        last_error = None
+        for attempt in range(2):
+            try:
+                resp = await client.get(url, **kwargs)
+                resp.raise_for_status()
+                return resp
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as exc:
+                last_error = exc
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
+        raise last_error
 
     @abstractmethod
     async def crawl(self, keywords: List[str] = None) -> List[dict]:

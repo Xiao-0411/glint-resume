@@ -1,35 +1,16 @@
 /**
- * 求职加速 Mock API
+ * 求职加速 API。职位相关数据必须来自后端真实职位库/实时抓取。
  */
 import {
-  mockJobSearch, mockAdaptResume, mockApplyJob,
-  mockGetApplications, mockUpdateApplicationStatus
-} from './mock'
-import {
   jobSearch, adaptResume, applyJob,
-  getApplications, updateApplicationStatus
+  getApplications, updateApplicationStatus, getCrawlerStatus
 } from './backend'
 
-const USE_BACKEND = import.meta.env.VITE_USE_BACKEND === 'true'
-
 export const jobHuntApi = {
-  search: (payload) => USE_BACKEND
-    ? jobSearch(payload)
-    : mockJobSearch(payload),
-
-  adapt: (payload) => USE_BACKEND
-    ? adaptResume(payload)
-    : mockAdaptResume(payload),
-
-  apply: (payload) => USE_BACKEND
-    ? applyJob(payload)
-    : mockApplyJob(payload),
-
-  getApplications: () => USE_BACKEND
-    ? getApplications()
-    : mockGetApplications(),
-
-  updateApplicationStatus: (payload) => USE_BACKEND
-    ? updateApplicationStatus(payload)
-    : mockUpdateApplicationStatus(payload)
+  search: (payload) => jobSearch(payload),
+  adapt: (payload) => adaptResume(payload),
+  apply: (payload) => applyJob(payload),
+  getApplications: () => getApplications(),
+  updateApplicationStatus: (payload) => updateApplicationStatus(payload),
+  getCrawlerStatus: () => getCrawlerStatus()
 }

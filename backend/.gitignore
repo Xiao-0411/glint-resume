@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.crawler_browser_profile/
+.crawler_chrome_profile/
+.crawler_chrome_profile_connected/
 venv/
 .idea/
 .vscode/

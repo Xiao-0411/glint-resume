@@ -5,10 +5,11 @@ POST /api/jobs/apply  ——  一键投递（持久化到 MySQL）
 GET  /api/jobs/applications  ——  获取投递列表（从 DB 读取）
 POST /api/jobs/applications/status  ——  更新投递状态（持久化）
 
-职位数据优先从爬虫库（jobs 表）读取，库为空时 fallback 到 mock 数据。
+职位数据来自爬虫库（jobs 表）；库为空时按关键词实时抓取，不返回 mock 职位。
 """
 import datetime
 import uuid
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_
@@ -16,16 +17,40 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.core.auth_deps import get_current_user
 from app.core.database import get_db
-from app.models.db_models import Application, Job, User
+from app.models.db_models import Application, Job, User, CrawlerStatus
 from app.models.schemas import (
     JobSearchRequest, JobAdaptRequest, JobApplyRequest, ApplicationStatusRequest
 )
 from app.mock.fallback import (
-    mock_job_search, mock_adapt_resume, mock_apply_job,
+    mock_adapt_resume, mock_apply_job,
     KW_MAP,
 )
+from app.crawlers.scheduler import crawl_keyword
 
 router = APIRouter()
+
+
+@router.get("/jobs/crawler-status")
+async def crawler_status(current_user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+    """返回三个招聘渠道最近一次抓取状态。"""
+    rows = {row.platform: row for row in db.query(CrawlerStatus).all()}
+    platforms = {"zhipin": "BOSS直聘", "zhaopin": "智联招聘", "liepin": "猎聘"}
+    data = []
+    for platform, label in platforms.items():
+        row = rows.get(platform)
+        data.append({
+            "platform": platform,
+            "label": label,
+            "status": row.status if row else "never",
+            "lastStartedAt": row.last_started_at.isoformat() if row and row.last_started_at else "",
+            "lastFinishedAt": row.last_finished_at.isoformat() if row and row.last_finished_at else "",
+            "lastSuccessAt": row.last_success_at.isoformat() if row and row.last_success_at else "",
+            "lastJobCount": row.last_job_count if row else 0,
+            "lastSavedCount": row.last_saved_count if row else 0,
+            "lastDurationMs": row.last_duration_ms if row else 0,
+            "lastError": row.last_error if row else "",
+        })
+    return {"platforms": data}
 
 STATUS_LABEL_MAP = {
     "applied": "已投递",
@@ -68,6 +93,9 @@ def _db_job_search(keyword: str = "", db: DBSession = None, limit: int = 60) -> 
             "tags": row.tags or [],
             "description": row.description or "",
             "requirements": row.requirements or [],
+            "platform": row.platform,
+            "url": row.url or "",
+            "crawledAt": row.crawled_at.isoformat() if row.crawled_at else "",
         })
     return results
 
@@ -125,7 +153,7 @@ def _calc_match(target_job: str, job: dict) -> dict:
 
 @router.post("/jobs/search")
 async def job_search(req: JobSearchRequest, current_user: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
-    """搜索职位并进行匹配分级。优先从爬虫库读取，库空时回退 mock。"""
+    """搜索真实职位。库为空时按当前关键词触发一次实时抓取，不返回 mock 职位。"""
     keyword = req.keyword or req.target_job or ""
 
     # 优先从数据库读取
@@ -146,10 +174,33 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
         matched.sort(key=lambda x: x["matchScore"], reverse=True)
         return {"jobs": matched, "total": len(matched), "source": "db"}
 
-    # 数据库为空，回退 mock
-    result = mock_job_search(keyword=keyword, target_job=req.target_job)
-    result["source"] = "mock"
-    return result
+    if keyword:
+        try:
+            await asyncio.wait_for(crawl_keyword(keyword), timeout=35)
+        except asyncio.TimeoutError:
+            return {"jobs": [], "total": 0, "source": "live_unavailable", "message": "实时职位抓取超时，请稍后重试"}
+        except Exception:
+            return {"jobs": [], "total": 0, "source": "live_unavailable", "message": "实时职位暂时不可用，请稍后重试"}
+
+        # 抓取器使用独立 DB 会话写入；结束本请求旧的读事务，避免 MySQL
+        # REPEATABLE READ 快照看不到刚提交的职位。
+        db.rollback()
+        db_jobs = _db_job_search(keyword=keyword, db=db)
+        if db_jobs:
+            matched = []
+            for job in db_jobs:
+                m = _calc_match(req.target_job or keyword, job)
+                matched.append({
+                    **job,
+                    "matchScore": m["score"],
+                    "matchLevel": m["level"],
+                    "reasons": m["reasons"],
+                    "missingSkills": m["missing"],
+                })
+            matched.sort(key=lambda x: x["matchScore"], reverse=True)
+            return {"jobs": matched, "total": len(matched), "source": "live"}
+
+    return {"jobs": [], "total": 0, "source": "empty", "message": "暂无匹配的真实职位，请更换关键词后重试"}
 
 
 @router.post("/jobs/adapt")
