@@ -11,7 +11,7 @@
  */
 
 // 与后端 _grade_of 一一对应，从高到低
-export const GRADE_TIERS = [
+const GRADE_TIERS = [
   { min: 82, label: '卓越', level: 'excellent', color: 'var(--color-success)' },
   { min: 68, label: '优秀', level: 'good', color: 'var(--color-success)' },
   { min: 52, label: '良好', level: 'pass', color: 'var(--color-warning)' },
@@ -34,12 +34,6 @@ export function scoreColor(score, backendColor) {
   if (backendColor) return backendColor
   if (typeof score !== 'number') return 'var(--color-text-muted)'
   return tierOf(score).color
-}
-
-/** 分数 -> 评级名称（卓越/优秀/…） */
-export function gradeLabel(score) {
-  if (typeof score !== 'number') return ''
-  return tierOf(score).label
 }
 
 /** 距下一档还差多少分；已是最高档返回空串 */

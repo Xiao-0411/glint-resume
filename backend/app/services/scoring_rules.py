@@ -10,7 +10,7 @@
 3. 双向计分 —— 好的加分,差的扣分;可信度尤其要能加分,否则经历越多越吃亏。
 """
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 
 # ============ 量化识别 ============
@@ -121,77 +121,8 @@ EXAGGERATION = (
 )
 
 
-# ============ 中文分词(轻量,无外部依赖) ============
+# ============ 经历文本提取 ============
 
-# 常见岗位领域词,用于匹配度切分。不求全,只求覆盖主流校招岗位。
-JOB_LEXICON = [
-    # 技术方向
-    "后端", "前端", "全栈", "客户端", "服务端", "移动端", "嵌入式",
-    "算法", "机器学习", "深度学习", "人工智能", "大模型", "自然语言处理",
-    "数据分析", "数据挖掘", "数据仓库", "大数据", "数据科学",
-    "测试", "运维", "安全", "网络", "数据库", "中间件", "架构",
-    "音视频", "图形学", "推荐系统", "搜索", "广告", "风控",
-    # 语言/技术栈
-    "java", "python", "golang", "go", "c++", "c#", "javascript", "typescript",
-    "rust", "kotlin", "swift", "php", "ruby", "scala",
-    "vue", "react", "angular", "node", "spring", "django", "flask",
-    "mysql", "redis", "kafka", "docker", "kubernetes", "k8s", "linux",
-    "pytorch", "tensorflow", "spark", "hadoop", "flink", "elasticsearch",
-    # 职能方向
-    "产品经理", "产品", "运营", "市场", "销售", "人力资源", "财务", "法务",
-    "设计师", "设计", "交互", "视觉", "用户研究", "内容", "编辑",
-    "项目管理", "咨询", "战略", "投研", "投资", "风险管理",
-    # 通用后缀
-    "工程师", "开发", "研发", "实习生", "专员", "助理", "顾问", "分析师",
-]
-# 长词优先,避免 "产品" 抢先吃掉 "产品经理"
-JOB_LEXICON_SORTED = sorted(JOB_LEXICON, key=len, reverse=True)
-
-# 这些词命中了也说明不了什么,不计入匹配度
-STOPWORD_TOKENS = {"工程师", "实习生", "专员", "助理", "开发", "研发", "岗", "岗位"}
-
-
-def tokenize_job(job: str) -> List[str]:
-    """
-    切分岗位名为关键词。
-    原实现用 [\\s/、,,]+ 切分,中文岗位名没有分隔符,
-    "Java后端开发工程师" 会整体变成一个 token,导致匹配度恒定。
-    这里改为:词典最长匹配 + 英文单词 + 剩余中文 2-gram 兜底。
-    """
-    if not job:
-        return []
-    text = job.lower().strip()
-    tokens: List[str] = []
-
-    # 1. 词典最长匹配,命中后用空格占位,防止重复切分
-    for word in JOB_LEXICON_SORTED:
-        if word in text:
-            tokens.append(word)
-            text = text.replace(word, " ")
-
-    # 2. 剩余的连续英文/数字当作独立 token
-    for m in re.finditer(r"[a-z][a-z0-9+#.]{1,}", text):
-        tokens.append(m.group(0))
-    text = re.sub(r"[a-z][a-z0-9+#.]{1,}", " ", text)
-
-    # 3. 剩余中文做 2-gram 兜底,保证生僻岗位名也能切出东西
-    for chunk in re.split(r"[^一-龥]+", text):
-        if len(chunk) >= 2:
-            for i in range(len(chunk) - 1):
-                tokens.append(chunk[i:i + 2])
-        elif len(chunk) == 1:
-            tokens.append(chunk)
-
-    # 去重保序,并剔除无信息量的通用后缀
-    seen = set()
-    out = []
-    for t in tokens:
-        t = t.strip()
-        if not t or t in seen or t in STOPWORD_TOKENS:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out
 
 
 def collect_bullets(resume: Dict) -> List[str]:

@@ -16,6 +16,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import or_
 from sqlalchemy.orm import Session as DBSession
 
@@ -147,8 +148,11 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
     if not db_jobs:
         return {"jobs": [], "total": 0, "source": "empty", "message": "暂无匹配的真实职位，请更换关键词后重试"}
 
-    profile = build_profile(db, target_job)
-    matched = rank_jobs(resume, db_jobs, profile)
+    # build_profile 会扫 JD 语料并跑大量正则,rank_jobs 要对每个职位做技能抽取。
+    # 两者都是同步的 CPU + DB 工作,直接在 async 函数里跑会阻塞事件循环
+    # (语料缓存未命中时实测约 200ms),放到线程池执行。
+    profile = await run_in_threadpool(build_profile, db, target_job)
+    matched = await run_in_threadpool(rank_jobs, resume, db_jobs, profile)
     return {
         "jobs": matched,
         "total": len(matched),
@@ -165,8 +169,21 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
 
 @router.post("/jobs/adapt")
 async def adapt_resume(req: JobAdaptRequest, current_user: User = Depends(get_current_user)):
-    """为指定岗位适配简历。"""
-    return mock_adapt_resume(job_id=req.job_id, target_job=req.target_job)
+    """为指定岗位适配简历。
+
+    ⚠️ 当前仍是演示实现:mock_adapt_resume 用的是内置示例简历与示例岗位,
+    与调用者的 job_id / 真实简历都无关,返回的 62→74 也是写死的常量。
+    真实的匹配度、缺失技能请以 /jobs/search 的结果为准 —— 那条链路已接入
+    用户真实简历与真实 JD 语料。
+
+    这里显式标记 simulated=True,让前端能如实告知用户"这是效果演示",
+    而不是把编造的分数当成对他简历的评估。
+    """
+    result = mock_adapt_resume(job_id=req.job_id, target_job=req.target_job)
+    result["simulated"] = True
+    # 适配结果里的 matchLevel 来自示例岗位,不能覆盖搜索结果里的真实等级
+    result.pop("matchLevel", None)
+    return result
 
 
 @router.post("/jobs/apply")

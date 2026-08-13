@@ -514,36 +514,3 @@ def mock_apply_job(job_id: str = "", resume_version: str = "original") -> dict:
         "statusHistory": [{"status": "applied", "at": now, "label": "简历已投递"}]
     }
 
-
-def mock_get_applications() -> dict:
-    import datetime
-    now = datetime.datetime.now().isoformat()
-    d1 = (datetime.datetime.now() - datetime.timedelta(days=3)).isoformat()
-    d2 = (datetime.datetime.now() - datetime.timedelta(days=5)).isoformat()
-    d3 = (datetime.datetime.now() - datetime.timedelta(days=7)).isoformat()
-    d4 = (datetime.datetime.now() - datetime.timedelta(days=4)).isoformat()
-    d5 = (datetime.datetime.now() - datetime.timedelta(days=2)).isoformat()
-    return {
-        "applications": [
-            {"id": "app_a1", "jobId": "job_001", "jobTitle": "产品经理（校招）", "company": "字节跳动", "resumeVersion": "original", "appliedAt": d1, "status": "interviewing", "statusLabel": "面试邀约", "statusHistory": [{"status": "applied", "at": d1, "label": "简历已投递"}, {"status": "screened", "at": (datetime.datetime.now() - datetime.timedelta(days=2)).isoformat(), "label": "简历通过筛选"}, {"status": "interviewing", "at": (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat(), "label": "面试邀约"}]},
-            {"id": "app_a2", "jobId": "job_004", "jobTitle": "产品助理", "company": "小红书", "resumeVersion": "adapted", "appliedAt": d2, "status": "screened", "statusLabel": "简历筛选", "statusHistory": [{"status": "applied", "at": d2, "label": "简历已投递"}, {"status": "screened", "at": (datetime.datetime.now() - datetime.timedelta(days=4)).isoformat(), "label": "简历通过筛选"}]},
-            {"id": "app_a3", "jobId": "job_008", "jobTitle": "AI产品实习生", "company": "百度", "resumeVersion": "original", "appliedAt": d3, "status": "offered", "statusLabel": "已获Offer", "statusHistory": [{"status": "applied", "at": d3, "label": "简历已投递"}, {"status": "screened", "at": (datetime.datetime.now() - datetime.timedelta(days=6)).isoformat(), "label": "简历通过筛选"}, {"status": "interviewing", "at": (datetime.datetime.now() - datetime.timedelta(days=4)).isoformat(), "label": "面试邀约"}, {"status": "offered", "at": (datetime.datetime.now() - datetime.timedelta(days=2)).isoformat(), "label": "已获Offer"}]},
-            {"id": "app_a4", "jobId": "job_005", "jobTitle": "数据分析师", "company": "美团", "resumeVersion": "original", "appliedAt": d4, "status": "rejected", "statusLabel": "未通过筛选", "statusHistory": [{"status": "applied", "at": d4, "label": "简历已投递"}, {"status": "rejected", "at": (datetime.datetime.now() - datetime.timedelta(days=2)).isoformat(), "label": "简历未通过筛选"}]},
-            {"id": "app_a5", "jobId": "job_006", "jobTitle": "运营专员", "company": "B站", "resumeVersion": "adapted", "appliedAt": d5, "status": "applied", "statusLabel": "已投递", "statusHistory": [{"status": "applied", "at": d5, "label": "简历已投递"}]},
-        ],
-        "stats": {"total": 5, "screened": 4, "interviewing": 2, "offered": 1, "rejected": 1}
-    }
-
-
-def mock_update_application_status(application_id: str = "", status: str = "") -> dict:
-    import datetime
-    label_map = {
-        "applied": "已投递", "screened": "简历通过筛选", "interviewing": "面试邀约",
-        "offered": "已获Offer", "rejected": "未通过筛选", "withdrawn": "已撤回"
-    }
-    return {
-        "applicationId": application_id,
-        "status": status,
-        "statusLabel": label_map.get(status, status),
-        "updatedAt": datetime.datetime.now().isoformat()
-    }

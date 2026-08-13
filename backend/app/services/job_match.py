@@ -161,9 +161,12 @@ def match_resume_to_job(
         }
 
     def weight_of(skill: str, is_core: bool) -> float:
-        # 无画像或画像里没有该技能时给 0.5 中性权重:
-        # 它确实是 JD 要求,只是市场频率未知,不能当作不重要。
-        base = 1.0 if profile is None else (profile.weight_of(skill) or 0.5)
+        # 画像里没有该技能时用 neutral_weight():它确实是 JD 要求,
+        # 只是市场语料没覆盖到,权重应贴合该画像自身的分布而非固定值。
+        if profile is None:
+            base = 1.0
+        else:
+            base = profile.weight_of(skill) or profile.neutral_weight()
         return base if is_core else base * DESC_ONLY_WEIGHT
 
     core_set = set(core)
@@ -225,7 +228,6 @@ def rank_jobs(
             "matchScore": m["score"],
             "matchLevel": m["level"],
             "reasons": m["reasons"],
-            "matchedSkills": m["matched"],
             "missingSkills": m["missing"],
         })
     out.sort(key=lambda j: (j["matchScore"] is None, -(j["matchScore"] or 0)))

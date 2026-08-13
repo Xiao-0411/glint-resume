@@ -52,6 +52,7 @@
           <span class="legend-item"><span class="dot green"></span>高匹配 可直接投递</span>
           <span class="legend-item"><span class="dot yellow"></span>中匹配 建议微调适配</span>
           <span class="legend-item"><span class="dot red"></span>低匹配 暂不建议</span>
+          <span class="legend-item"><span class="dot unknown"></span>匹配度未知 缺简历或岗位未列要求</span>
         </div>
 
         <!-- 匹配依据：如实说明分数怎么来的，不含糊其辞 -->
@@ -636,6 +637,12 @@
             </div>
           </div>
 
+          <!-- 适配功能尚未接入真实简历，如实标注，避免用户把演示分数当成自己的评估结果 -->
+          <div v-if="detailAdapted?.simulated" class="adapt-simulated-note">
+            以下为「AI 适配」功能的效果演示（示例简历），分数非你的真实评估。
+            你的真实匹配度与待补足技能请见左侧「匹配分析」。
+          </div>
+
           <!-- 高匹配提示 -->
           <div v-if="detailAdapted && detailNoChange" class="resume-nochange-banner">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -810,9 +817,10 @@ const skillGaps = computed(() => {
 const detailJob = ref(null)
 const detailAdapted = computed(() => detailJob.value ? huntStore.adaptedResumes[detailJob.value.id] : null)
 const adaptingDetail = ref(false)
-// 详情页统一以「适配结果」为准：搜索列表里的 matchLevel 可能是改阈值前的旧缓存，
-// 而适配结果是打开详情时按当前规则重新计算的，最可靠。加载中回落到搜索结果。
-const detailLevel = computed(() => detailAdapted.value?.matchLevel || detailJob.value?.matchLevel)
+// 详情页匹配等级直接用搜索结果 —— 那是按用户真实简历与真实 JD 算出来的。
+// 适配接口目前仍是演示实现(返回 simulated=true),其 matchLevel 基于示例岗位，
+// 不能用来覆盖真实等级。
+const detailLevel = computed(() => detailJob.value?.matchLevel)
 // 高匹配（绿色）岗位：适配结果标记 noChange，右侧直接展示原简历全文、不显示 diff
 const detailNoChange = computed(() => detailAdapted.value?.noChange === true)
 
@@ -1161,6 +1169,7 @@ function crawlerStatusLabel(status) {
 .dot.green { background: #10B981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15); }
 .dot.yellow { background: #F59E0B; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15); }
 .dot.red { background: #EF4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15); }
+.dot.unknown { background: #9CA3AF; box-shadow: 0 0 0 3px rgba(156, 163, 175, 0.15); }
 
 /* ============ 加载 & 空态 ============ */
 .loading-state {
@@ -1270,6 +1279,15 @@ function crawlerStatusLabel(status) {
 .match-tag.yellow { background: #FEF3C7; color: #D97706; }
 .match-tag.red { background: #FEE2E2; color: #DC2626; }
 .match-tag.unknown { background: #F3F4F6; color: #6B7280; }
+.adapt-simulated-note {
+  margin: 10px 0 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-soft, #FEF3C7);
+  color: var(--color-warning, #D97706);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
 .match-basis {
   margin-top: 8px;
   font-size: 12px;

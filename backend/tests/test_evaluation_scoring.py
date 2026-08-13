@@ -13,11 +13,11 @@ import unittest
 from unittest.mock import patch
 
 from app.services import evaluation_service as ev
+from app.services import jd_corpus
 from app.services.scoring_rules import (
     score_bullet_credibility,
     score_bullet_professional,
     score_bullet_quant,
-    tokenize_job,
 )
 
 
@@ -115,11 +115,48 @@ MEDIUM_RESUME = {
 
 
 def _evaluate(resume, target_job=""):
-    """跑完整评分,LLM 部分打桩为不可用(退化为纯规则分),保证结果可复现"""
-    with patch.object(ev, "_score_professionalism_llm", return_value={}) as _:
+    """跑完整评分。
+
+    两处打桩保证结果可复现:
+    - LLM 置为不可用 → 专业度退化为纯规则分
+    - JD 语料置为固定样本 → 匹配度不依赖本机数据库里有没有爬到职位,
+      否则测试会随爬虫数据漂移(没有 DB 时还会每次尝试真实连接)
+    """
+    jd_corpus.clear_cache()
+    with patch.object(ev, "_score_professionalism_llm", return_value={}), \
+            patch.object(jd_corpus, "_fetch_jd_rows", side_effect=_fake_jd_rows):
         async def run():
             return await ev.evaluate_resume(resume, target_job)
-        return asyncio.run(run())
+        result = asyncio.run(run())
+    jd_corpus.clear_cache()
+    return result
+
+
+class _FakeJob:
+    """模拟 jobs 表的一行,只保留画像统计用到的字段"""
+
+    def __init__(self, job_id, requirements):
+        self.id = job_id
+        self.title = ""
+        self.requirements = requirements
+        self.tags = []
+        self.description = ""
+
+
+# 各岗位的模拟招聘要求。测试只需要"有足够语料且要求稳定",不追求真实分布。
+_FAKE_CORPUS = {
+    "java": ["Java", "Spring", "MySQL", "Redis"],
+    "前端": ["JavaScript", "Vue", "CSS", "HTML"],
+    "设计": ["Figma", "UI设计", "交互设计"],
+}
+
+
+def _fake_jd_rows(db, target_job):
+    low = (target_job or "").lower()
+    for key, reqs in _FAKE_CORPUS.items():
+        if key in low:
+            return [_FakeJob(i, reqs) for i in range(6)]
+    return []
 
 
 def _dim(report, name):
@@ -129,32 +166,59 @@ def _dim(report, name):
     raise AssertionError(f"维度 {name} 不存在")
 
 
-# ============ 分词 ============
+# ============ 技能识别与岗位画像 ============
 
-class TestTokenizeJob(unittest.TestCase):
-    """旧实现用 [\\s/、,,]+ 切中文岗位名,整串变成一个 token"""
+class TestSkillExtraction(unittest.TestCase):
+    """技能词边界:三个爬虫曾各有一份裸正则实现,把 PostgreSQL 认成 SQL"""
 
-    def test_chinese_job_splits_into_multiple_tokens(self):
-        tokens = tokenize_job("Java后端开发工程师")
-        self.assertIn("java", tokens)
-        self.assertIn("后端", tokens)
-        # 关键:不能整串成为一个 token
-        self.assertNotIn("java后端开发工程师", tokens)
+    def test_no_substring_false_positive(self):
+        from app.services.skill_extract import extract_skills
+        found = extract_skills("掌握 PostgreSQL 与 MongoDB")
+        self.assertIn("PostgreSQL", found)
+        self.assertNotIn("SQL", found)
 
-    def test_stopwords_removed(self):
-        # "工程师" 本身没有区分度,不应计入关键词
-        self.assertNotIn("工程师", tokenize_job("算法工程师"))
+    def test_alias_normalized(self):
+        from app.services.skill_extract import extract_skills
+        # 简历写 k8s、JD 写 Kubernetes,必须归一才能比对上
+        self.assertIn("Kubernetes", extract_skills("熟悉 k8s 容器编排"))
+        self.assertIn("Go", extract_skills("使用 Golang 开发"))
 
-    def test_longest_match_wins(self):
-        # "产品经理" 不应被切成 "产品"
-        self.assertIn("产品经理", tokenize_job("产品经理"))
+    def test_strict_mode_drops_non_skills(self):
+        from app.services.skill_extract import canonicalize
+        # 智联的 tags 放的是福利,不能当成技能要求
+        welfare = ["五险一金", "带薪年假", "Java"]
+        self.assertEqual(canonicalize(welfare, strict=True), ["Java"])
+        # 简历侧要保留词表外的真实技能
+        self.assertIn("自研调度框架", canonicalize(["自研调度框架"]))
 
-    def test_unknown_job_falls_back_to_bigram(self):
-        # 词典没有的岗位也要能切出东西,不能返回空
-        self.assertTrue(len(tokenize_job("量子计算研究员")) > 0)
 
-    def test_empty(self):
-        self.assertEqual(tokenize_job(""), [])
+class TestJobProfile(unittest.TestCase):
+    """岗位画像必须来自真实 JD 的文档频率,而不是手写词表"""
+
+    def test_weight_reflects_document_frequency(self):
+        jd_corpus.clear_cache()
+        rows = [_FakeJob(i, ["Java", "MySQL"]) for i in range(9)]
+        rows.append(_FakeJob(9, ["Java", "Flink"]))
+        with patch.object(jd_corpus, "_fetch_jd_rows", return_value=rows):
+            profile = jd_corpus.build_profile(object(), "Java后端开发工程师")
+        jd_corpus.clear_cache()
+        self.assertEqual(profile.source, "jd")
+        # 10 条里 9 条要 MySQL、1 条要 Flink
+        self.assertGreater(profile.weight_of("MySQL"), profile.weight_of("Flink"))
+
+    def test_degrades_when_corpus_too_small(self):
+        jd_corpus.clear_cache()
+        with patch.object(jd_corpus, "_fetch_jd_rows", return_value=[]):
+            profile = jd_corpus.build_profile(object(), "Java后端开发工程师")
+        jd_corpus.clear_cache()
+        self.assertEqual(profile.source, "starter")
+
+    def test_single_char_terms_dropped(self):
+        # "的" 会 LIKE '%的%' 命中几乎所有 JD,污染统计
+        self.assertEqual(jd_corpus._job_search_terms("的"), [])
+
+    def test_like_wildcards_escaped(self):
+        self.assertEqual(jd_corpus._like_pattern("100%"), "%100\\%%")
 
 
 # ============ 单条 bullet 打分 ============
@@ -185,6 +249,35 @@ class TestBulletQuant(unittest.TestCase):
         without = score_bullet_quant("覆盖3个模块")
         self.assertLess(with_vague, without)
 
+    def test_whitespace_does_not_break_delta_quant(self):
+        """回归:曾把 \\s 当断句,"降低 65%" 比 "降低65%" 低 48 分,
+        而带空格恰恰是更规范的排版"""
+        self.assertEqual(
+            score_bullet_quant("接口耗时降低 65%"),
+            score_bullet_quant("接口耗时降低65%"),
+        )
+
+    def test_space_separated_clauses_not_treated_as_delta(self):
+        """但空格也不能一律放行:跨词拼接不是成果量化"""
+        self.assertLess(score_bullet_quant("提升 团队协作 参与3次评审"), 0.9)
+
+    def test_before_after_range_recognized(self):
+        """"从 A 到 B" 是最有说服力的写法,两端未必都带量纲"""
+        self.assertGreaterEqual(score_bullet_quant("QPS 从 200 提升至 1200"), 0.9)
+        self.assertGreaterEqual(score_bullet_quant("单表数据量从2000万降至200万"), 0.9)
+
+    def test_date_range_is_not_an_achievement(self):
+        """回归:任职时间区间曾被当成成果量化"""
+        self.assertLess(score_bullet_quant("从2019年到2021年担任第2组组长"), 0.9)
+
+    def test_long_input_does_not_hang(self):
+        """回归:\\d+\\.?\\d* 的歧义量词对长数字串有指数级回溯"""
+        import time
+        evil = "从" + "1" * 2000 + "提升" + "9" * 2000
+        start = time.monotonic()
+        score_bullet_quant(evil)
+        self.assertLess(time.monotonic() - start, 0.5)
+
 
 class TestBulletProfessional(unittest.TestCase):
     def test_strong_verb_lead_scores_high(self):
@@ -208,6 +301,17 @@ class TestBulletProfessional(unittest.TestCase):
             "这个项目里面有一些需要优化的地方后来也都处理掉了还行"
         )
         self.assertGreater(lead, buried)
+
+    def test_empty_rhetoric_cannot_game_professionalism(self):
+        """回归:只看开头动词和字数时,纯堆砌形容词的句子能拿 0.80"""
+        padded = score_bullet_professional(
+            "主导设计行业领先的完美架构，显著提升性能，大幅优化体验，极大降低成本"
+        )
+        substantive = score_bullet_professional(
+            "主导设计后端服务架构，落地12个核心接口，支撑日均10万请求"
+        )
+        self.assertLess(padded, substantive)
+        self.assertLess(padded, 0.3, f"空话句仍拿到 {padded}")
 
 
 class TestBulletCredibility(unittest.TestCase):
@@ -291,6 +395,57 @@ class TestDimensionScores(unittest.TestCase):
         five = _score_completeness_of(5)
         self.assertLess(one, three)
         self.assertLess(three, five)
+
+    def test_keyword_stuffing_does_not_beat_real_skills(self):
+        """核心回归:匹配度必须衡量"会不会这个岗位要的技能",
+        而不是"简历里出现了几次岗位名"。
+
+        曾经的冷启动兜底按岗位名关键词覆盖度打分,结果反复写"量子炼金"
+        的空洞简历拿 92 分,而有真实成果的简历拿 0 分。"""
+        stuffer = {
+            "basic": {"fullname": "刷分", "target_job": "Java后端开发工程师"},
+            "education": [{"school": "某大学"}],
+            "experiences": [{
+                "id": "exp_001", "title": "Java后端", "role": "Java后端开发",
+                "tag": {"color": "green"},
+                "bullets": ["负责Java后端相关工作，参与Java后端开发，熟悉Java后端流程"],
+            }],
+            "skills": {"technical": []},
+        }
+        stuffed = _dim(_evaluate(stuffer, "Java后端开发工程师"), "匹配度")
+        real = _dim(_evaluate(STRONG_RESUME, "Java后端开发工程师"), "匹配度")
+        self.assertGreater(real, stuffed,
+                           f"真材实料={real} 蹭关键词={stuffed}")
+
+    def test_unknown_job_reports_no_data_instead_of_guessing(self):
+        """语料覆盖不到的岗位应如实说明,而不是编一个分数"""
+        resume = dict(STRONG_RESUME, basic={"fullname": "李四", "target_job": "量子炼金术士"})
+        report = _evaluate(resume, "量子炼金术士")
+        match = next(d for d in report["dimensions"] if d["name"] == "匹配度")
+        self.assertEqual(match["score"], 0)
+        self.assertIn("暂无", match["desc"])
+
+    def test_proven_skills_outrank_merely_listed(self):
+        """写进经历(真的用过)应比只列在技能栏得分高 —— 打分要与内容挂钩"""
+        listed_only = {
+            "basic": {"fullname": "A", "target_job": "Java后端开发工程师"},
+            "education": [{"school": "某大学"}],
+            "experiences": [{"id": "e1", "tag": {"color": "green"},
+                             "bullets": ["参与了一些开发工作"]}],
+            "skills": {"technical": ["Java", "Spring", "MySQL", "Redis"]},
+        }
+        proven = {
+            "basic": {"fullname": "B", "target_job": "Java后端开发工程师"},
+            "education": [{"school": "某大学"}],
+            "experiences": [{"id": "e1", "tag": {"color": "green"}, "bullets": [
+                "主导设计订单服务，基于Java与Spring落地，MySQL分库分表配合Redis缓存",
+            ]}],
+            "skills": {"technical": ["Java", "Spring", "MySQL", "Redis"]},
+        }
+        self.assertGreater(
+            _dim(_evaluate(proven, "Java后端开发工程师"), "匹配度"),
+            _dim(_evaluate(listed_only, "Java后端开发工程师"), "匹配度"),
+        )
 
 
 def _score_completeness_of(n_exp):

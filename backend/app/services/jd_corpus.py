@@ -40,9 +40,19 @@ MIN_CORPUS_SIZE = 3
 # 又能避免每次搜索都全表扫描。
 CACHE_TTL_SECONDS = 30 * 60
 
+# 降级画像(starter/empty)的缓存时长要短得多。
+# 冷启动或爬虫刚失败时会缓存一份兜底画像,如果沿用 30 分钟,
+# 爬虫补完数据后用户还要继续看半小时的"通用岗位模型"评分。
+# 1 分钟足以挡住高频重复查询,又能在数据到位后很快切回真实语料。
+DEGRADED_CACHE_TTL_SECONDS = 60
+
 # 单个岗位最多取多少条 JD 参与统计。超过这个量对权重分布没有实质影响,
 # 只是徒增查询开销。
 MAX_CORPUS_SIZE = 200
+
+# 缓存条目上限。target_job 由用户输入,不设上限的话每个不同岗位名
+# 都会永久占一个槽位。超限时按写入时间淘汰最旧的一批。
+MAX_CACHE_ENTRIES = 512
 
 
 # ============ 降级用的兜底画像 ============
@@ -92,17 +102,24 @@ class JobProfile:
         """画像是否来自真实市场数据"""
         return self.source == "jd"
 
-    def top_skills(self, n: int = 12) -> List[str]:
-        return [s for s, _ in sorted(
-            self.skill_weights.items(), key=lambda kv: -kv[1]
-        )[:n]]
-
     def weight_of(self, skill: str) -> float:
         return self.skill_weights.get(skill, 0.0)
 
-    @property
-    def total_weight(self) -> float:
-        return sum(self.skill_weights.values())
+    def neutral_weight(self) -> float:
+        """
+        画像里没有的技能该记多少权重。
+
+        不能固定给 0.5 —— 画像权重是文档频率,含义是"多少比例的 JD 要求它",
+        实际分布常集中在 0.6~1.0。固定 0.5 会让"整个市场都没提过的冷门技能"
+        比一半的真实要求还重要,缺它反而扣得更多。
+        改取画像权重的中位数并再打 8 折:它确实是这条 JD 的要求(不能记 0),
+        但既然市场语料里没出现过,重要性理应低于该岗位的典型要求。
+        """
+        if not self.skill_weights:
+            return 0.5
+        values = sorted(self.skill_weights.values())
+        median = values[len(values) // 2]
+        return max(0.05, median * 0.8)
 
 
 # 进程内缓存: target_job(小写) -> (画像, 写入时间)
@@ -114,7 +131,13 @@ def _now() -> float:
 
 
 def clear_cache() -> None:
-    """测试与手动刷新用"""
+    """清空画像缓存。
+
+    缓存是**进程内**的,因此只能由本进程调用才有效
+    (另起一个 python 进程调用它清的是那个进程自己的空字典)。
+    主要给测试隔离用例状态用;运行中的服务无需手动清理 ——
+    降级画像 1 分钟后自动重建,真实画像 30 分钟后自动过期。
+    """
     _CACHE.clear()
 
 
@@ -251,6 +274,9 @@ def build_profile(db: Optional[DBSession], target_job: str) -> JobProfile:
     db 为 None 时自建一个只读会话去查语料 —— 评分接口(resume/evaluate)
     没有现成的 db 依赖,但同样应该按真实 JD 标准来评分,不能因为调用方
     没传 session 就退化成兜底词表。取不到语料时静默降级,不影响主流程。
+
+    降级画像只缓存 1 分钟(见 DEGRADED_CACHE_TTL_SECONDS):否则爬虫补完
+    数据后,用户还要再看半小时基于兜底模型算出来的分数。
     """
     job = (target_job or "").strip()
     if not job:
@@ -258,8 +284,12 @@ def build_profile(db: Optional[DBSession], target_job: str) -> JobProfile:
 
     cache_key = job.lower()
     cached = _CACHE.get(cache_key)
-    if cached and _now() - cached[1] < CACHE_TTL_SECONDS:
-        return cached[0]
+    if cached:
+        profile, written_at = cached
+        ttl = (CACHE_TTL_SECONDS if profile.is_empirical
+               else DEGRADED_CACHE_TTL_SECONDS)
+        if _now() - written_at < ttl:
+            return profile
 
     profile = _starter_profile(job)
     own_session = None
@@ -293,5 +323,15 @@ def build_profile(db: Optional[DBSession], target_job: str) -> JobProfile:
         if own_session is not None:
             own_session.close()
 
-    _CACHE[cache_key] = (profile, _now())
+    _remember(cache_key, profile)
     return profile
+
+
+def _remember(cache_key: str, profile: JobProfile) -> None:
+    """写入缓存,并在超出上限时淘汰最旧的条目。"""
+    if len(_CACHE) >= MAX_CACHE_ENTRIES:
+        # 一次清掉最旧的 1/4,避免每次写入都要排序
+        drop = sorted(_CACHE.items(), key=lambda kv: kv[1][1])[: MAX_CACHE_ENTRIES // 4]
+        for key, _ in drop:
+            _CACHE.pop(key, None)
+    _CACHE[cache_key] = (profile, _now())

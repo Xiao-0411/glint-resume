@@ -7,8 +7,9 @@
 细粒度规则见 app/services/scoring_rules.py。
 """
 import json
-import re
 from typing import Dict, List, Tuple
+
+from fastapi.concurrency import run_in_threadpool
 
 from app.core.prompts import QUALITY_LLM_PROMPT
 from app.services import llm_service
@@ -16,15 +17,10 @@ from app.services.dialog_service import _strip_code_fence
 from app.services.jd_corpus import JobProfile, build_profile
 from app.services.job_match import extract_resume_skills
 from app.services.scoring_rules import (
-    QUANT_WITH_UNIT,
-    VERB_STRONG,
-    VERB_NEUTRAL,
-    VAGUE_WORDS,
     collect_bullets,
     score_bullet_credibility,
     score_bullet_professional,
     score_bullet_quant,
-    tokenize_job,
 )
 
 # 加权总分 —— 量化度和专业度是简历质量的主要区分点,完整度只是及格线。
@@ -35,10 +31,6 @@ DIMENSION_WEIGHTS = {
     "匹配度": 0.20,
     "可信度": 0.10,
 }
-
-# 兼容旧调用:少量地方仍引用 QUANT_PATTERN / PRO_VERBS
-QUANT_PATTERN = QUANT_WITH_UNIT
-PRO_VERBS = VERB_STRONG | VERB_NEUTRAL
 
 
 def _score_completeness(resume: Dict) -> Dict:
@@ -176,7 +168,9 @@ def _score_match(resume: Dict, target_job: str, profile: JobProfile = None) -> D
 
     现在以真实 JD 语料为准:profile 里的技能来自该岗位近期的招聘要求,
     权重是它在多少条 JD 里出现过。简历覆盖了高频要求才算真的匹配。
-    语料不足时 profile 会自动降级为通用岗位模型(见 jd_corpus)。
+    语料不足时 profile 会降级为通用岗位模型(见 jd_corpus);连通用模型
+    都覆盖不到的冷门岗位,如实返回"无法评估"而不是硬凑一个分数 ——
+    曾经的关键词兜底会让蹭岗位名的简历拿 92 分、真材实料的拿 0 分。
     """
     job = (target_job or (resume.get("basic") or {}).get("target_job") or "").strip()
     if not job:
@@ -184,10 +178,11 @@ def _score_match(resume: Dict, target_job: str, profile: JobProfile = None) -> D
 
     if profile is None:
         profile = build_profile(None, job)
-    # 岗位画像为空(冷启动且岗位名无法归类)时,退回到关键词覆盖的旧口径,
-    # 保证该维度不会因为没有语料就恒为 0。
     if not profile.skill_weights:
-        return _score_match_by_keyword(resume, job)
+        # 没有任何可比对的岗位要求。给 0 分并说明原因,比按"简历里出现了几次
+        # 岗位名"编一个分数诚实 —— 后者恰好奖励堆砌关键词。
+        return {"name": "匹配度", "score": 0, "max": 100,
+                "desc": f"暂无「{job}」的招聘数据,无法评估岗位匹配度"}
 
     resume_skills = extract_resume_skills(resume)
     if resume_skills.is_empty:
@@ -220,61 +215,6 @@ def _score_match(resume: Dict, target_job: str, profile: JobProfile = None) -> D
         desc = f"与「{job}」{basis}差距较大,建议优先补足「{top_missing}」"
     else:
         desc = f"简历中未体现「{job}」{basis}所要求的技能"
-    return {"name": "匹配度", "score": score, "max": 100, "desc": desc}
-
-
-def _score_match_by_keyword(resume: Dict, job: str) -> Dict:
-    """
-    冷启动兜底:没有任何岗位画像时,退回岗位名关键词覆盖度。
-
-    只在 jd_corpus 既无真实语料、也无法把岗位归入通用模型时触发
-    (例如"量子炼金术士"这类词表完全覆盖不到的岗位名)。
-    """
-    keywords = tokenize_job(job)
-    if not keywords:
-        return {"name": "匹配度", "score": 0, "max": 100, "desc": "未能解析目标岗位关键词"}
-
-    # 经历正文 vs 技能清单分开统计:写进经历里的关键词才是真的会用
-    exp_text = " ".join(collect_bullets(resume)).lower()
-    for exp in resume.get("experiences") or []:
-        exp_text += " " + str(exp.get("title", "")).lower()
-        exp_text += " " + str(exp.get("role", "")).lower()
-    skills = resume.get("skills") or {}
-    skill_text = ""
-    skill_items = 0
-    if isinstance(skills, dict):
-        for group in skills.values():
-            if isinstance(group, list):
-                skill_text += " " + " ".join(str(s) for s in group).lower()
-                skill_items += len(group)
-
-    hit_exp = sum(1 for kw in keywords if kw in exp_text)
-    hit_skill = sum(1 for kw in keywords if kw not in exp_text and kw in skill_text)
-
-    # 经历命中权重 1.0,仅技能清单命中权重 0.5
-    covered = (hit_exp + hit_skill * 0.5) / len(keywords)
-
-    # 覆盖率封顶 —— 岗位名切出的关键词很少时(如"前端开发"只有 1 个 token),
-    # 命中一次就 100% 覆盖,该维度会退化成有/无二值。
-    cap = {0: 0.0, 1: 0.62, 2: 0.78, 3: 0.9}.get(len(keywords), 1.0)
-    base = min(covered, cap)
-
-    # 证据厚度:命中关键词在经历正文里出现的总次数,以及技能清单的相关广度。
-    depth_hits = sum(exp_text.count(kw) for kw in keywords if kw in exp_text)
-    depth = min(1.0, depth_hits / (len(keywords) * 3))
-    breadth = min(1.0, skill_items / 6)
-
-    ratio = base + (1 - base) * (depth * 0.6 + breadth * 0.4) if base > 0 else 0.0
-    score = int(round(max(0, min(100, ratio * 100))))
-
-    if score >= 75:
-        desc = f"与「{job}」的关键词对齐度高"
-    elif score >= 45:
-        desc = f"与「{job}」部分对齐,核心关键词仍有缺口"
-    elif score > 0:
-        desc = f"与「{job}」的关键词覆盖偏低,建议在经历中显式体现"
-    else:
-        desc = f"经历中几乎未出现「{job}」相关关键词"
     return {"name": "匹配度", "score": score, "max": 100, "desc": desc}
 
 
@@ -342,12 +282,12 @@ def _resume_to_text(resume: Dict) -> str:
     return "\n".join(parts)
 
 
-async def evaluate_resume(resume: Dict, target_job: str = "", db=None) -> Dict:
+async def evaluate_resume(resume: Dict, target_job: str = "") -> Dict:
     """
     五维评分 + 亮点/改善 + 行动指南
 
-    db 传入时,匹配度会以该岗位的真实 JD 语料为标准;不传则退化为
-    通用岗位模型(见 jd_corpus.build_profile),不影响其余四个维度。
+    匹配度以目标岗位的真实 JD 语料为标准(见 jd_corpus.build_profile,
+    它会自建只读会话取语料并带缓存),其余四个维度只看简历本身。
     """
     completeness = _score_completeness(resume)
     quantification = _score_quantification(resume)
@@ -380,7 +320,10 @@ async def evaluate_resume(resume: Dict, target_job: str = "", db=None) -> Dict:
     }
 
     job_for_match = (target_job or (resume.get("basic") or {}).get("target_job") or "").strip()
-    profile = build_profile(db, job_for_match) if job_for_match else None
+    # build_profile 是同步的 DB + 正则工作,evaluate_resume 在 async 端点里被 await,
+    # 直接调用会阻塞事件循环,放线程池执行。
+    profile = (await run_in_threadpool(build_profile, None, job_for_match)
+               if job_for_match else None)
     match = _score_match(resume, target_job, profile)
     credibility = _score_credibility(resume)
 
@@ -471,22 +414,6 @@ def _highlight_title(name: str) -> str:
         "匹配度": "岗位匹配精准",
         "可信度": "内容真实可信"
     }.get(name, name)
-
-
-def _find_weakest_bullet(resume: Dict, predicate) -> Dict:
-    """
-    在 resume.experiences 中找出第一个匹配 predicate 的 bullet,
-    返回 {exp_id, exp_title, bullet} 或空 dict
-    """
-    for exp in resume.get("experiences", []):
-        for b in exp.get("bullets", []):
-            if predicate(b):
-                return {
-                    "exp_id": exp.get("id", ""),
-                    "exp_title": exp.get("title", ""),
-                    "bullet": b
-                }
-    return {}
 
 
 def _worst_bullet_by(resume: Dict, scorer) -> Dict:
@@ -706,7 +633,6 @@ def _build_experience_count_reminder(resume: Dict) -> Dict:
     if n > 3:
         return {}
 
-    job = resume.get("basic", {}).get("target_job", "目标岗位")
     # 根据已有经历类型,给出未覆盖的方向
     existing_types = {e.get("type", "") for e in exps}
     suggestions = []
@@ -723,7 +649,7 @@ def _build_experience_count_reminder(resume: Dict) -> Dict:
             suggestions.append({
                 "original": "",
                 "suggestion": f"补充一段「{hint}」,套用 STAR-L 法则展开",
-                "reason": f"丰富经历类型 → 提升整体竞争力"
+                "reason": "丰富经历类型 → 提升整体竞争力"
             })
         if len(suggestions) >= 3:
             break

@@ -28,10 +28,6 @@ export const useJobHuntStore = defineStore('jobHunt', () => {
   const adaptedResumes = ref({})      // jobId -> { originalScore, adaptedScore, html }
 
   // ---- Getters ----
-  const greenJobs = computed(() => matchedJobs.value.filter(j => j.matchLevel === 'green'))
-  const yellowJobs = computed(() => matchedJobs.value.filter(j => j.matchLevel === 'yellow'))
-  const redJobs = computed(() => matchedJobs.value.filter(j => j.matchLevel === 'red'))
-
   const conversionRates = computed(() => {
     const t = stats.value.total
     if (t === 0) return { screened: 0, interview: 0, offer: 0 }
@@ -104,7 +100,7 @@ export const useJobHuntStore = defineStore('jobHunt', () => {
   return {
     searchKeyword, searchResults, matchedJobs, searchLoading,
     applications, stats, adaptingJobId, adaptedResumes,
-    greenJobs, yellowJobs, redJobs, conversionRates,
+    conversionRates,
     setSearchResults, setMatchedJobs, setSearchLoading,
     addApplication, updateApplicationStatus, recalcStats,
     setAdaptingJobId, saveAdaptedResume, reset

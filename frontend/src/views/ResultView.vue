@@ -200,6 +200,8 @@
                 <div class="dd-bar-fill" :class="scoreLevel(d.score)" :style="{ width: d.score + '%' }"></div>
               </div>
               <p class="dd-desc">{{ d.desc }}</p>
+              <!-- 匹配度是唯一依赖外部数据的维度，标明它对照的是什么标准 -->
+              <p v-if="d.name === '匹配度' && matchBasisText" class="dd-basis">{{ matchBasisText }}</p>
             </div>
           </div>
 
@@ -277,6 +279,16 @@ const report = computed(() => store.qualityReport)
 
 // 距下一档还差多少分。阈值统一由 utils/grading 定义(与后端 _grade_of 对齐)
 const gradeGapText = computed(() => computeGradeGap(report.value?.total_score))
+
+// 匹配度依据:说明这个分数是对照什么标准算出来的
+const matchBasisText = computed(() => {
+  const b = report.value?.match_basis
+  if (!b || !b.targetJob) return ''
+  if (b.profileSource === 'jd' && b.sampleSize) {
+    return `评判标准：「${b.targetJob}」近期 ${b.sampleSize} 条真实招聘要求，越多岗位要求的技能权重越高`
+  }
+  return `评判标准：通用「${b.targetJob}」岗位模型（真实招聘数据样本不足，待职位库补充后自动切换）`
+})
 
 const topDimensions = computed(() => {
   if (!report.value?.dimensions) return []
@@ -1321,6 +1333,13 @@ function goHome() {
 .dd-desc {
   font-size: 1.1rem;
   color: var(--color-text-muted);
+  line-height: 1.55;
+}
+.dd-basis {
+  margin-top: 6px;
+  font-size: 0.98rem;
+  color: var(--color-text-muted);
+  opacity: 0.85;
   line-height: 1.55;
 }
 
