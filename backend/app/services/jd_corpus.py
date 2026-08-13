@@ -230,8 +230,13 @@ def _skills_of_job(row: Job) -> List[str]:
     三个来源合并:结构化的 requirements、平台标签 tags、以及描述正文。
     requirements 是爬虫抽好的,tags 是平台自带的,描述兜底 —— 早期入库的
     数据 requirements 可能为空,不看描述就会白白丢掉一条语料。
+
+    tags 必须 strict 归一:各平台该字段语义不一(智联放福利、猎聘放公司标签),
+    原样计入会让"五险一金"成为高频"技能要求",直接污染岗位画像。
     """
-    skills = canonicalize(list(row.requirements or []) + list(row.tags or []))
+    skills = canonicalize(
+        list(row.requirements or []) + list(row.tags or []), strict=True
+    )
     if row.description:
         for s in extract_skills(row.description):
             if s not in skills:

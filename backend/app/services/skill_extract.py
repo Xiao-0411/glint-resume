@@ -173,12 +173,19 @@ def extract_skills(text: str, limit: int = 0) -> List[str]:
     return found
 
 
-def canonicalize(items: Iterable[str]) -> List[str]:
+def canonicalize(items: Iterable[str], strict: bool = False) -> List[str]:
     """
-    把已经是"技能条目"的列表(简历 skills、JD tags)归一到规范名。
+    把已经是"技能条目"的列表(简历 skills、JD requirements/tags)归一到规范名。
 
-    与 extract_skills 的区别:这里每个条目本身就是技能词,
-    因此整条命中即可;命中不了的原样保留(用户可能写了词表外的技能)。
+    与 extract_skills 的区别:这里每个条目本身就是一条技能,整条命中即可。
+
+    strict 控制词表外条目的去留,两种场景要求相反:
+    - 简历技能栏(strict=False):用户可能写了词表覆盖不到的真实技能
+      ("自研调度框架"),原样保留,否则会白白丢掉他的能力项。
+    - JD 标签(strict=True):各平台 tags 字段语义完全不同 —— 智联放的是
+      福利("五险一金""带薪年假"),猎聘放的是公司标签("已上市""1000-9999人")。
+      这些一旦被当成技能要求,一份完全对口的简历会因为"缺少五险一金"
+      被判成低匹配(实测 33 分 red)。因此只保留能对上词表的条目。
     """
     out: List[str] = []
     seen: Set[str] = set()
@@ -189,7 +196,12 @@ def canonicalize(items: Iterable[str]) -> List[str]:
         canon = _ALIAS_TO_CANON.get(item.lower())
         if canon is None:
             hits = extract_skills(item, limit=1)
-            canon = hits[0] if hits else item
+            if hits:
+                canon = hits[0]
+            elif strict:
+                continue
+            else:
+                canon = item
         if canon not in seen:
             seen.add(canon)
             out.append(canon)

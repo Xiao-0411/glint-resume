@@ -16,7 +16,7 @@
 比缺一个"1 成 JD 才要的 Flink"扣得多。
 """
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.services.jd_corpus import JobProfile
 from app.services.skill_extract import canonicalize, extract_skills
@@ -94,17 +94,33 @@ def extract_resume_skills(resume: Optional[Dict]) -> ResumeSkills:
     return ResumeSkills(proven=proven, listed=listed)
 
 
-def job_required_skills(job: Dict) -> List[str]:
-    """从职位 dict 中取出它要求的技能(规范名)"""
-    required = canonicalize(
-        list(job.get("requirements") or []) + list(job.get("tags") or [])
+# 描述正文里提到、但不在结构化要求中的技能,权重打这个折扣。
+# JD 正文混杂着"加分项""了解即可"以及"团队协作/沟通能力"这类通用素质,
+# 与 requirements/tags 里列明的硬性要求不是一个量级。不打折的话,
+# 一份覆盖了全部核心要求的简历会因为没写"沟通能力"而被判低匹配。
+DESC_ONLY_WEIGHT = 0.35
+
+
+def job_required_skills(job: Dict) -> Tuple[List[str], List[str]]:
+    """
+    从职位 dict 中取出它要求的技能(规范名)。
+
+    返回 (核心要求, 仅正文提及)。前者来自 requirements/tags 这类结构化字段,
+    是平台或爬虫明确标注的硬要求;后者是从描述正文里额外扫出来的,
+    包含大量"优先""了解"级别的软性内容,不能等同看待。
+    """
+    core = canonicalize(
+        list(job.get("requirements") or []) + list(job.get("tags") or []),
+        strict=True,
     )
+    desc_only: List[str] = []
     desc = job.get("description") or ""
     if desc:
+        core_set = set(core)
         for s in extract_skills(desc):
-            if s not in required:
-                required.append(s)
-    return required
+            if s not in core_set:
+                desc_only.append(s)
+    return core, desc_only
 
 
 def match_resume_to_job(
@@ -116,12 +132,14 @@ def match_resume_to_job(
     计算一份简历与一个职位的匹配度。
 
     分数 = 已掌握技能的权重和 / JD 全部要求的权重和。
-    每个技能的权重取自 jd_corpus 的市场频率(缺失则记 0.5 的中性权重),
+    每个技能的权重 = 市场频率(来自 jd_corpus) × 该要求的硬性程度,
     因此:
       - JD 列得多不再自动扣分 —— 分子分母同步增长
       - 缺核心技能扣得比缺边缘技能狠
+      - 正文里的"加分项/软技能"不会把满足硬要求的简历拖成低匹配
     """
-    required = job_required_skills(job)
+    core, desc_only = job_required_skills(job)
+    required = core + desc_only
 
     if not required:
         # JD 没写清楚要什么,不臆测。返回 None 分数,由调用方决定如何展示。
@@ -142,19 +160,19 @@ def match_resume_to_job(
             "reasons": "尚未生成简历，无法评估匹配度",
         }
 
-    def weight_of(skill: str) -> float:
+    def weight_of(skill: str, is_core: bool) -> float:
         # 无画像或画像里没有该技能时给 0.5 中性权重:
         # 它确实是 JD 要求,只是市场频率未知,不能当作不重要。
-        if profile is None:
-            return 1.0
-        return profile.weight_of(skill) or 0.5
+        base = 1.0 if profile is None else (profile.weight_of(skill) or 0.5)
+        return base if is_core else base * DESC_ONLY_WEIGHT
 
+    core_set = set(core)
     total = 0.0
     earned = 0.0
     matched: List[str] = []
     missing: List[tuple] = []
     for skill in required:
-        w = weight_of(skill)
+        w = weight_of(skill, skill in core_set)
         total += w
         credit = resume_skills.credit_of(skill)
         if credit > 0:
