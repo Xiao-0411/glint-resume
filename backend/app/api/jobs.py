@@ -11,6 +11,7 @@ POST /api/jobs/applications/status  ——  更新投递状态（持久化）
 市场频率（见 services/job_match.py 与 services/jd_corpus.py）。
 """
 import datetime
+import json
 import uuid
 import asyncio
 import logging
@@ -21,13 +22,17 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.auth_deps import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.db_models import Application, Job, User, CrawlerStatus
 from app.models.schemas import (
     JobSearchRequest, JobAdaptRequest, JobApplyRequest, ApplicationStatusRequest
 )
-from app.mock.fallback import mock_adapt_resume, mock_apply_job
+from app.mock.fallback import mock_apply_job
+from app.services import llm_service
+from app.services.evaluation_service import evaluate_resume
 from app.services.jd_corpus import build_profile
+from app.services.job_adapt import AdaptError, adapt_resume_to_job
 from app.services.job_match import rank_jobs
 from app.store.db_store import session_store
 from app.crawlers.scheduler import crawl_keyword
@@ -167,23 +172,72 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
     }
 
 
+def _load_db_job(job_id: str, db: DBSession) -> dict:
+    """按 job_id 取真实职位。取不到返回空 dict。"""
+    if not job_id.startswith("job_db_"):
+        return {}
+    try:
+        row_id = int(job_id.replace("job_db_", ""))
+    except ValueError:
+        return {}
+    row = db.query(Job).filter(Job.id == row_id, Job.is_active == True).first()
+    if row is None:
+        return {}
+    return {
+        "id": job_id,
+        "title": row.title,
+        "company": row.company,
+        "description": row.description or "",
+        "requirements": row.requirements or [],
+        "tags": row.tags or [],
+    }
+
+
 @router.post("/jobs/adapt")
-async def adapt_resume(req: JobAdaptRequest, current_user: User = Depends(get_current_user)):
-    """为指定岗位适配简历。
+async def adapt_resume(
+    req: JobAdaptRequest,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    """针对指定岗位适配用户的真实简历。
 
-    ⚠️ 当前仍是演示实现:mock_adapt_resume 用的是内置示例简历与示例岗位,
-    与调用者的 job_id / 真实简历都无关,返回的 62→74 也是写死的常量。
-    真实的匹配度、缺失技能请以 /jobs/search 的结果为准 —— 那条链路已接入
-    用户真实简历与真实 JD 语料。
-
-    这里显式标记 simulated=True,让前端能如实告知用户"这是效果演示",
-    而不是把编造的分数当成对他简历的评估。
+    读 resumes 表里用户最近一份简历 + jobs 表里的真实 JD,由 LLM 做定向改写
+    (只调措辞、不造经历,见 services/job_adapt),前后分数用真实评分算出。
     """
-    result = mock_adapt_resume(job_id=req.job_id, target_job=req.target_job)
-    result["simulated"] = True
-    # 适配结果里的 matchLevel 来自示例岗位,不能覆盖搜索结果里的真实等级
-    result.pop("matchLevel", None)
-    return result
+    if not settings.llm_available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI 服务未配置，暂时无法进行岗位适配",
+        )
+
+    resume = _load_user_resume(current_user.id)
+    job = _load_db_job(req.job_id, db)
+    target_job = job.get("title") or req.target_job
+
+    try:
+        profile = await run_in_threadpool(build_profile, db, target_job)
+        with llm_service.usage_context(
+            user_id=current_user.id,
+            endpoint="/api/jobs/adapt",
+            source="job_adapt",
+        ):
+            return await adapt_resume_to_job(
+                resume=resume,
+                job=job,
+                profile=profile,
+                score_fn=evaluate_resume,
+            )
+    except AdaptError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except llm_service.LLMQuotaExceeded as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
+    except (llm_service.LLMError, json.JSONDecodeError):
+        # 改写本身失败时不返回编造内容,让用户知道可以重试
+        logger.warning("job_adapt_llm_failed", extra={"job_id": req.job_id})
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI 适配暂时不可用，请稍后重试",
+        )
 
 
 @router.post("/jobs/apply")

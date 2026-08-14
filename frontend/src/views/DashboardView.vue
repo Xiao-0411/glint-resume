@@ -637,10 +637,9 @@
             </div>
           </div>
 
-          <!-- 适配功能尚未接入真实简历，如实标注，避免用户把演示分数当成自己的评估结果 -->
-          <div v-if="detailAdapted?.simulated" class="adapt-simulated-note">
-            以下为「AI 适配」功能的效果演示（示例简历），分数非你的真实评估。
-            你的真实匹配度与待补足技能请见左侧「匹配分析」。
+          <!-- 未体现的 JD 技能：AI 不会替用户把它们写进简历，只能提示去补 -->
+          <div v-if="detailAdapted?.skillAdvice" class="adapt-skill-advice">
+            {{ detailAdapted.skillAdvice }}
           </div>
 
           <!-- 高匹配提示 -->
@@ -817,9 +816,8 @@ const skillGaps = computed(() => {
 const detailJob = ref(null)
 const detailAdapted = computed(() => detailJob.value ? huntStore.adaptedResumes[detailJob.value.id] : null)
 const adaptingDetail = ref(false)
-// 详情页匹配等级直接用搜索结果 —— 那是按用户真实简历与真实 JD 算出来的。
-// 适配接口目前仍是演示实现(返回 simulated=true),其 matchLevel 基于示例岗位，
-// 不能用来覆盖真实等级。
+// 详情页匹配等级用搜索结果 —— 那是按用户真实简历与真实 JD 算出来的。
+// 适配接口只返回改写内容与前后分数，不再自带 matchLevel。
 const detailLevel = computed(() => detailJob.value?.matchLevel)
 // 高匹配（绿色）岗位：适配结果标记 noChange，右侧直接展示原简历全文、不显示 diff
 const detailNoChange = computed(() => detailAdapted.value?.noChange === true)
@@ -944,9 +942,14 @@ async function onAdaptResume(job) {
       targetJob: chatStore.targetJob
     })
     huntStore.saveAdaptedResume(job.id, result)
-    showToast(`适配完成！简历质量分 ${result.originalScore} → ${result.adaptedScore}`)
+    if (result.adapted) {
+      showToast(`适配完成！质量分 ${result.originalScore} → ${result.adaptedScore}，匹配度 ${result.originalMatchScore ?? '-'} → ${result.adaptedMatchScore ?? '-'}`)
+    } else {
+      showToast(result.changes?.[0] || '当前简历无需调整')
+    }
   } catch (e) {
-    showToast('适配失败，请重试', 'error')
+    // 后端会明确说明原因（没有简历 / 职位已下架 / AI 暂不可用），如实转达
+    showToast(e?.response?.data?.detail || '适配失败，请重试', 'error')
   } finally {
     huntStore.setAdaptingJobId(null)
     adaptingDetail.value = false
@@ -1279,7 +1282,7 @@ function crawlerStatusLabel(status) {
 .match-tag.yellow { background: #FEF3C7; color: #D97706; }
 .match-tag.red { background: #FEE2E2; color: #DC2626; }
 .match-tag.unknown { background: #F3F4F6; color: #6B7280; }
-.adapt-simulated-note {
+.adapt-skill-advice {
   margin: 10px 0 14px;
   padding: 10px 14px;
   border-radius: var(--radius-md);
