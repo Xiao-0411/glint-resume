@@ -165,7 +165,7 @@
                     {{ huntStore.adaptingJobId === job.id ? 'AI 适配中...' : 'AI 微调适配' }}
                   </button>
                   <button
-                    v-if="huntStore.adaptedResumes[job.id]"
+                    v-if="huntStore.adaptedResumes[job.id]?.adapted"
                     class="action-btn primary"
                     @click="onApplyJob(job, 'adapted')"
                     :disabled="appliedJobIds[job.id] || !hasResume"
@@ -578,8 +578,9 @@
               </svg>
               {{ appliedJobIds[detailJob.id] ? '已投递' : '一键投递' }}
             </button>
+            <!-- 适配对所有等级开放：绿色可再打磨措辞，红色也有权自己决定要不要投 -->
             <button
-              v-if="detailLevel === 'yellow'"
+              v-if="detailLevel !== 'unknown'"
               class="action-btn secondary"
               @click.stop="onAdaptResume(detailJob)"
               :disabled="adaptingDetail || huntStore.adaptingJobId === detailJob.id || !hasResume"
@@ -587,10 +588,12 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
               </svg>
-              {{ (adaptingDetail || huntStore.adaptingJobId === detailJob.id) ? 'AI 适配中...' : '重新适配' }}
+              {{ (adaptingDetail || huntStore.adaptingJobId === detailJob.id)
+                  ? 'AI 适配中...'
+                  : (huntStore.adaptedResumes[detailJob.id] ? '重新适配' : 'AI 针对此岗位适配') }}
             </button>
             <button
-              v-if="detailLevel === 'yellow' && huntStore.adaptedResumes[detailJob.id]"
+              v-if="huntStore.adaptedResumes[detailJob.id]?.adapted"
               class="action-btn primary"
               @click.stop="onApplyJob(detailJob, 'adapted')"
               :disabled="appliedJobIds[detailJob.id] || !hasResume"
@@ -626,7 +629,7 @@
           <div class="detail-right-header">
             <h4 class="detail-section-title">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-              {{ !hasResume ? '简历适配' : (detailNoChange ? '你的简历' : '适配版简历') }}
+              {{ !hasResume ? '简历适配' : (detailAdapted?.adapted ? '适配版简历' : '你的简历') }}
             </h4>
             <div v-if="detailAdapted && !detailNoChange" class="detail-score-compare">
               <span class="detail-score-old">{{ detailAdapted.originalScore }}分</span>
@@ -643,11 +646,12 @@
           </div>
 
           <!-- 高匹配提示 -->
+          <!-- 适配未产生改动：如实说明原因（本就贴合 / 改写被判为不实而拒绝） -->
           <div v-if="detailAdapted && detailNoChange" class="resume-nochange-banner">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
             </svg>
-            <span>你的简历已覆盖该岗位的主要技能要求，无需修改即可直接投递</span>
+            <span>{{ detailAdapted.changes?.[0] || '当前简历无需调整' }}</span>
           </div>
 
           <!-- 图例（仅适配场景显示） -->
@@ -729,6 +733,11 @@
                 </template>
               </div>
             </div>
+          </div>
+
+          <!-- 尚未适配：直接展示用户自己的简历（不消耗 AI 额度） -->
+          <div v-else-if="chatStore.resumeData" class="detail-resume-clean">
+            <ResumePreview :resume="chatStore.resumeData" :show-toolbar="false" />
           </div>
 
           <!-- 加载失败兜底 -->
@@ -824,34 +833,13 @@ const detailNoChange = computed(() => detailAdapted.value?.noChange === true)
 
 async function onOpenJobDetail(job) {
   detailJob.value = job
-  // 未登录：右侧简历区用蒙版锁定，不调用模拟接口；登录后由 watch 自动加载
-  if (!auth.isLoggedIn) return
-  // 没有简历：右侧显示"去创建简历"引导，不伪造适配简历
-  if (!hasResume.value) return
-  loadDetailResume(job)
+  // 打开详情不再自动调用适配接口 —— 那是一次真实的 LLM 调用，
+  // 每开一张卡片就烧一次配额（每日上限 100 次，浏览 33 个岗位就耗尽）。
+  // 右侧默认展示用户自己的简历，需要适配时由用户点「AI 微调适配」。
 }
 
-// 静默加载该岗位的简历数据，保证右侧不为空
-async function loadDetailResume(job) {
-  // 没有简历时不调用适配接口，避免凭空生成一份简历
-  if (!job || !hasResume.value || adaptingDetail.value || huntStore.adaptedResumes[job.id]) return
-  adaptingDetail.value = true
-  try {
-    const result = await jobHuntApi.adapt({
-      jobId: job.id,
-      targetJob: chatStore.targetJob
-    })
-    huntStore.saveAdaptedResume(job.id, result)
-  } catch (e) {
-    // 静默失败，右侧回落到空态
-  } finally {
-    adaptingDetail.value = false
-  }
-}
-
-// 用户在详情页登录后，自动补载此前被蒙版锁定的简历
+// 登录后补载投递记录（简历本身由 store 提供，无需再请求适配接口）
 watch(() => auth.isLoggedIn, (now) => {
-  if (now && detailJob.value) loadDetailResume(detailJob.value)
   if (now && hasResume.value) loadApplications()
 })
 

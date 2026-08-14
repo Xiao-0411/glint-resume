@@ -13,6 +13,7 @@ job_id 和他本人的简历都没被读过。
   返回后还要逐条校验,凭空多出来的数字会被打回原文
 - 前后分数用 evaluation_service 真实评分算出来,不是常量
 """
+import asyncio
 import json
 import logging
 import re
@@ -28,7 +29,7 @@ from app.services.job_match import (
     job_required_skills,
     match_resume_to_job,
 )
-from app.services.scoring_rules import QUANT_WITH_UNIT
+from app.services.skill_extract import extract_skills
 
 logger = logging.getLogger("glint.job_adapt")
 
@@ -45,57 +46,92 @@ class AdaptError(Exception):
     """适配无法完成(缺简历、缺岗位等),由调用方转成对用户可读的提示"""
 
 
-def _collect_bullets(resume: Dict) -> List[Tuple[str, int, str]]:
+def _collect_bullets(resume: Dict) -> List[Tuple[int, int, str]]:
     """
     取出所有 bullet,附带定位信息。
 
-    返回 [(exp_id, bullet_index, text)],exp_id 用简历里的真实 id,
-    这样 LLM 回传的编号能精确定位回原位置。
+    返回 [(经历下标, bullet 下标, 文本)]。定位**用下标而不是 exp.id** ——
+    PDF 上传的简历各段 id 可能都是空串,用 id 拼出来的键会重复
+    ("#0" 同时指向第一段和第二段的首条),导致改写落到错误的 bullet 上。
     """
-    out: List[Tuple[str, int, str]] = []
-    for exp in resume.get("experiences") or []:
-        exp_id = exp.get("id") or ""
-        for idx, b in enumerate(exp.get("bullets") or []):
+    out: List[Tuple[int, int, str]] = []
+    for e_idx, exp in enumerate(resume.get("experiences") or []):
+        for b_idx, b in enumerate(exp.get("bullets") or []):
             if isinstance(b, str) and b.strip():
-                out.append((exp_id, idx, b.strip()))
-            if len(out) >= MAX_BULLETS:
-                return out
+                out.append((e_idx, b_idx, b.strip()))
+                if len(out) >= MAX_BULLETS:
+                    return out
     return out
 
 
-def _numbers_in(text: str) -> List[str]:
-    """取出文本中所有"带量纲的数字",用于校验改写有没有凭空造数据"""
-    return QUANT_WITH_UNIT.findall(text or "")
+# 中文数字/量词。只查阿拉伯数字挡不住"提升三倍""服务数万用户"这类表述。
+# 逐词比对而不是"有没有出现过中文数字字符" —— 原文的 "5万" 里也含 "万",
+# 若只判字符存在与否,改写加个 "三倍" 会因为原文有 "万" 而被放行。
+_CN_NUM_WORD = re.compile(
+    r"(?:数|几)?[一二三四五六七八九十百千万亿两]+(?:倍|余|多|成)?"
+)
+# 夸张的成果断言,原文没有就不该冒出来
+_CLAIM_WORDS = (
+    "第一", "冠军", "金奖", "特等奖", "一等奖", "满分", "最佳",
+    "翻倍", "数倍", "成倍", "大幅", "显著", "极大",
+)
 
 
-def _has_invented_number(original: str, adapted: str) -> bool:
+def _has_invented_claim(original: str, adapted: str, allowed_skills: set) -> Optional[str]:
     """
-    改写后是否出现了原文没有的数字。
+    改写是否引入了原文不存在的事实。返回违规说明,合规返回 None。
 
-    LLM 最常见的越界方式就是"顺手补一个漂亮的数据"。这里做保守校验:
-    只要改写里出现原文不存在的数字串,就判定为编造。
-    (数字换算写法如 "2000万"→"2千万" 也会被拦下,但这种改写本身没价值,
-    误伤成本远低于放过一个虚构数据。)
+    LLM 越界不止"补一个数字"这一种。实测还会:把"三倍""数万"这类中文数量词
+    写进去、给用户安上简历里没有的技能(Kubernetes)、公司(字节跳动)、
+    头衔(技术负责人),以及"获得第一名"这种成果断言。逐类检查:
+
+    1. 阿拉伯数字:改写里出现原文没有的数字串即判违规。
+    2. 中文数字:逐个词比对,改写里出现原文没有的中文数量词即判违规。
+    3. 成果断言词:原文没有而改写有,判违规。
+    4. 技能词:改写提到的技能必须在原 bullet 或用户技能清单里出现过 ——
+       允许把用户真会的技能说得更醒目,但不能凭空安上他不会的。
+
+    公司名/头衔无法穷举,靠 prompt 约束 + 上面几类兜底;
+    真出现时通常会连带触发中文数字或断言词。
     """
     orig_nums = set(re.findall(r"\d+\.?\d*", original or ""))
     for num in re.findall(r"\d+\.?\d*", adapted or ""):
         if num not in orig_nums:
-            return True
-    return False
+            return f"引入了原文没有的数字「{num}」"
+
+    orig_cn = set(_CN_NUM_WORD.findall(original or ""))
+    for word in _CN_NUM_WORD.findall(adapted or ""):
+        if word not in orig_cn:
+            return f"引入了原文没有的数量表述「{word}」"
+
+    for word in _CLAIM_WORDS:
+        if word in (adapted or "") and word not in (original or ""):
+            return f"引入了原文没有的断言「{word}」"
+
+    for skill in extract_skills(adapted or ""):
+        if skill not in allowed_skills:
+            return f"引入了简历中不存在的技能「{skill}」"
+
+    return None
 
 
 def _apply_rewrites(
-    resume: Dict, rewrites: List[Dict], bullets: List[Tuple[str, int, str]]
-) -> Tuple[Dict, List[Dict]]:
+    resume: Dict,
+    rewrites: List[Dict],
+    bullets: List[Tuple[int, int, str]],
+    allowed_skills: set,
+) -> Tuple[Dict, List[Dict], List[Dict]]:
     """
     把 LLM 的改写落到简历副本上,并逐条校验。
 
-    返回 (适配后简历, 实际生效的改动列表)。被判定为编造的改写会被丢弃,
+    返回 (适配后简历, 生效的改动, 被拒绝的改动)。判定为编造的改写会被丢弃,
     原文保持不变 —— 宁可少改,不能造假。
     """
     adapted = deepcopy(resume)
-    index = {f"{exp_id}#{idx}": (exp_id, idx, text) for exp_id, idx, text in bullets}
+    exps = adapted.get("experiences") or []
+    index = {f"{e}#{b}": (e, b, text) for e, b, text in bullets}
     applied: List[Dict] = []
+    rejected: List[Dict] = []
 
     for item in rewrites or []:
         if not isinstance(item, dict):
@@ -105,32 +141,34 @@ def _apply_rewrites(
         located = index.get(key)
         if not located or not new_text:
             continue
-        exp_id, idx, original = located
+        e_idx, b_idx, original = located
         if new_text == original:
             continue
-        if _has_invented_number(original, new_text):
+
+        violation = _has_invented_claim(original, new_text, allowed_skills)
+        if violation:
             logger.warning(
-                "job_adapt_rejected_invented_number",
-                extra={"bullet_id": key, "original": original[:60], "adapted": new_text[:60]},
+                "job_adapt_rejected_rewrite",
+                extra={"bullet": key, "reason": violation, "adapted": new_text[:80]},
             )
+            rejected.append({"original": original, "adapted": new_text, "reason": violation})
             continue
 
-        for exp in adapted.get("experiences") or []:
-            if (exp.get("id") or "") != exp_id:
-                continue
+        if e_idx < len(exps):
+            exp = exps[e_idx]
             bl = exp.get("bullets") or []
-            if idx < len(bl):
-                bl[idx] = new_text
+            if b_idx < len(bl):
+                bl[b_idx] = new_text
                 applied.append({
-                    "expId": exp_id,
+                    "expIndex": e_idx,
+                    "bulletIndex": b_idx,
                     "expTitle": exp.get("title", ""),
                     "original": original,
                     "adapted": new_text,
                     "reason": str(item.get("reason") or "").strip(),
                 })
-            break
 
-    return adapted, applied
+    return adapted, applied, rejected
 
 
 def _build_sections(original: Dict, adapted: Dict, applied: List[Dict]) -> List[Dict]:
@@ -140,7 +178,9 @@ def _build_sections(original: Dict, adapted: Dict, applied: List[Dict]) -> List[
     字段形状沿用原 mock 的约定(name / changes[{type, text|original+adapted}]),
     前端 DashboardView 的 diff 渲染逻辑无需改动。
     """
-    changed_keys = {(c["expId"], c["original"]) for c in applied}
+    # 用(经历下标, bullet 下标)定位,不能用文本 —— 同一段里出现两条一样的
+    # bullet 时,按文本匹配会把两条都标成"已改",其中一条其实没动。
+    changed = {(c["expIndex"], c["bulletIndex"]) for c in applied}
     sections: List[Dict] = []
 
     basic = original.get("basic") or {}
@@ -166,7 +206,10 @@ def _build_sections(original: Dict, adapted: Dict, applied: List[Dict]) -> List[
         sections.append({"name": "教育背景", "changes": edu_changes})
 
     exp_changes: List[Dict] = []
-    for oe, ae in zip(original.get("experiences") or [], adapted.get("experiences") or []):
+    orig_exps = original.get("experiences") or []
+    adapt_exps = adapted.get("experiences") or []
+    for e_idx, oe in enumerate(orig_exps):
+        ae = adapt_exps[e_idx] if e_idx < len(adapt_exps) else oe
         head = "  |  ".join(
             str(oe.get(k, "")) for k in ("title", "role", "period") if oe.get(k)
         )
@@ -174,9 +217,9 @@ def _build_sections(original: Dict, adapted: Dict, applied: List[Dict]) -> List[
             exp_changes.append({"type": "unchanged", "text": head})
         o_bullets = oe.get("bullets") or []
         a_bullets = ae.get("bullets") or []
-        for i, ob in enumerate(o_bullets):
-            ab = a_bullets[i] if i < len(a_bullets) else ob
-            if ab != ob and (oe.get("id", ""), ob) in changed_keys:
+        for b_idx, ob in enumerate(o_bullets):
+            ab = a_bullets[b_idx] if b_idx < len(a_bullets) else ob
+            if (e_idx, b_idx) in changed and ab != ob:
                 exp_changes.append({"type": "changed", "original": "• " + ob, "adapted": "• " + ab})
             else:
                 exp_changes.append({"type": "unchanged", "text": "• " + ob})
@@ -209,13 +252,13 @@ def _build_sections(original: Dict, adapted: Dict, applied: List[Dict]) -> List[
 async def _request_rewrites(
     resume: Dict,
     job: Dict,
-    bullets: List[Tuple[str, int, str]],
+    bullets: List[Tuple[int, int, str]],
     resume_skills: List[str],
     missing_skills: List[str],
 ) -> Dict:
     """调 LLM 拿改写建议。失败时抛 LLMError,由调用方决定降级策略。"""
     bullets_block = "\n".join(
-        f"{exp_id}#{idx}: {text}" for exp_id, idx, text in bullets
+        f"{e_idx}#{b_idx}: {text}" for e_idx, b_idx, text in bullets
     )
     core, desc_only = job_required_skills(job)
     prompt = JOB_ADAPT_PROMPT.format(
@@ -231,7 +274,12 @@ async def _request_rewrites(
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
     )
-    return json.loads(_strip_code_fence(raw))
+    payload = json.loads(_strip_code_fence(raw))
+    if not isinstance(payload, dict):
+        # json.loads 对 '["x"]' / '"none"' / '42' 都会成功,但后续 .get 会炸成 500。
+        # 统一按"LLM 输出格式不对"处理,让上层返回可重试的 503。
+        raise llm_service.LLMError("适配结果格式异常")
+    return payload
 
 
 async def adapt_resume_to_job(
@@ -266,24 +314,39 @@ async def adapt_resume_to_job(
         missing_skills=before.get("missing") or [],
     )
 
-    adapted, applied = _apply_rewrites(resume, payload.get("rewrites"), bullets)
-    proposed = len([r for r in (payload.get("rewrites") or []) if isinstance(r, dict)])
+    # 允许出现在改写里的技能 = 用户已有的技能 + 各条原文里本来就提到的。
+    # 超出这个集合就是给用户安上他不会的东西。
+    allowed_skills = set(skills.proven) | set(skills.listed)
+    for _, _, text in bullets:
+        allowed_skills.update(extract_skills(text))
 
-    # 前后分数都用真实评分算,不是常量
-    original_report = await score_fn(resume, target_job)
-    adapted_report = (
-        await score_fn(adapted, target_job) if applied else original_report
+    adapted, applied, rejected = _apply_rewrites(
+        resume, payload.get("rewrites"), bullets, allowed_skills
     )
+
+    # 前后分数都用真实评分算,不是常量。
+    # 两次评分互不依赖,并发跑把耗时从"两次之和"压到"较慢的一次"
+    # (每次内部都要调一次 LLM 评语言专业度)。
+    if applied:
+        original_report, adapted_report = await asyncio.gather(
+            score_fn(resume, target_job),
+            score_fn(adapted, target_job),
+        )
+    else:
+        original_report = await score_fn(resume, target_job)
+        adapted_report = original_report
     after = match_resume_to_job(extract_resume_skills(adapted), job, profile)
 
     changes = [str(s).strip() for s in (payload.get("summary") or []) if str(s).strip()]
     if not applied:
         # 区分两种"没改动":简历本就贴合,和改写越界被拦下。
         # 后者不能说成"无需调整",否则用户以为简历没问题。
-        if proposed:
-            changes = ["AI 给出的改写引入了简历中不存在的数据，已全部拒绝；原文保持不变"]
+        if rejected:
+            changes = [f"AI 的改写引入了简历中不存在的内容（{rejected[0]['reason']}），已全部拒绝；原文保持不变"]
         else:
             changes = ["当前简历已较贴合该岗位，无需调整表述"]
+    elif rejected:
+        changes.append(f"另有 {len(rejected)} 条改写因引入不实内容被拒绝")
 
     advice = str(payload.get("skill_advice") or "").strip()
 
