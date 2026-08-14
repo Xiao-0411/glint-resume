@@ -64,17 +64,35 @@ def _collect_bullets(resume: Dict) -> List[Tuple[int, int, str]]:
     return out
 
 
-# 中文数字/量词。只查阿拉伯数字挡不住"提升三倍""服务数万用户"这类表述。
-# 逐词比对而不是"有没有出现过中文数字字符" —— 原文的 "5万" 里也含 "万",
-# 若只判字符存在与否,改写加个 "三倍" 会因为原文有 "万" 而被放行。
-_CN_NUM_WORD = re.compile(
-    r"(?:数|几)?[一二三四五六七八九十百千万亿两]+(?:倍|余|多|成)?"
+# 中文数量表述。只查阿拉伯数字挡不住"提升三倍""服务数万用户"这类说法。
+#
+# 但不能见到中文数字就拦 —— "统一身份认证""一致性""第三方"里的
+# 一/三 都不是数量,实测会把正常改写全误伤掉。因此要求数字后面必须跟
+# **量词**(倍/万/人/次…)才算数量表述,并单列"第N名"这类排名说法。
+_CN_DIGITS = "一二三四五六七八九十百千万亿两"
+_CN_QUANT = re.compile(
+    rf"(?:数|几)?[{_CN_DIGITS}]+\s*"
+    rf"(?:倍|成|余|多|个|人|次|条|项|件|万|亿|千|百|天|周|月|年|分|秒|小时|篇|款|家|台|套|张|单)"
+    # "数万用户""数十人"里,量词本身就是万/十,后面不再跟量词。
+    # 单列这一类:必须以"数/几"开头,避免误伤"万事俱备"这类成语。
+    rf"|(?:数|几)[{_CN_DIGITS}]+"
 )
+# 排名/名次:"第一名""第二"。要求带名次量词,否则 "第三方登录" 会被误判 ——
+# "第三方" 是名词不是名次。
+_CN_RANK = re.compile(rf"第\s*[{_CN_DIGITS}]+\s*(?:名|位|届|等奖)")
 # 夸张的成果断言,原文没有就不该冒出来
 _CLAIM_WORDS = (
-    "第一", "冠军", "金奖", "特等奖", "一等奖", "满分", "最佳",
+    "冠军", "金奖", "特等奖", "一等奖", "满分", "最佳",
     "翻倍", "数倍", "成倍", "大幅", "显著", "极大",
 )
+
+# 通用工作方法,不算"可造假的资历"。写进改写里不构成虚假陈述
+# (说自己"设计了测试用例"和说自己"精通 Kubernetes"不是一回事),
+# 因此不纳入技能白名单校验,否则正常改写会被大面积误伤。
+_GENERIC_SKILLS = {
+    "测试用例", "需求分析", "项目管理", "团队协作", "沟通能力",
+    "数据分析", "竞品分析", "市场调研", "数据复盘", "接口测试",
+}
 
 
 def _has_invented_claim(original: str, adapted: str, allowed_skills: set) -> Optional[str]:
@@ -88,28 +106,31 @@ def _has_invented_claim(original: str, adapted: str, allowed_skills: set) -> Opt
     1. 阿拉伯数字:改写里出现原文没有的数字串即判违规。
     2. 中文数字:逐个词比对,改写里出现原文没有的中文数量词即判违规。
     3. 成果断言词:原文没有而改写有,判违规。
-    4. 技能词:改写提到的技能必须在原 bullet 或用户技能清单里出现过 ——
+    4. 技能词:改写提到的**硬技能**必须在原 bullet 或用户技能清单里出现过 ——
        允许把用户真会的技能说得更醒目,但不能凭空安上他不会的。
+       通用工作方法类词汇(测试用例、需求分析、团队协作…)不在此列:
+       它们描述的是做事方式而非可造假的资历,拦下来只会误伤正常改写。
 
     公司名/头衔无法穷举,靠 prompt 约束 + 上面几类兜底;
-    真出现时通常会连带触发中文数字或断言词。
+    真出现时通常会连带触发数量表述或断言词。
     """
     orig_nums = set(re.findall(r"\d+\.?\d*", original or ""))
     for num in re.findall(r"\d+\.?\d*", adapted or ""):
         if num not in orig_nums:
             return f"引入了原文没有的数字「{num}」"
 
-    orig_cn = set(_CN_NUM_WORD.findall(original or ""))
-    for word in _CN_NUM_WORD.findall(adapted or ""):
-        if word not in orig_cn:
-            return f"引入了原文没有的数量表述「{word}」"
+    for pattern, label in ((_CN_QUANT, "数量表述"), (_CN_RANK, "名次表述")):
+        orig_hits = set(pattern.findall(original or ""))
+        for hit in pattern.findall(adapted or ""):
+            if hit not in orig_hits:
+                return f"引入了原文没有的{label}「{hit}」"
 
     for word in _CLAIM_WORDS:
         if word in (adapted or "") and word not in (original or ""):
             return f"引入了原文没有的断言「{word}」"
 
     for skill in extract_skills(adapted or ""):
-        if skill not in allowed_skills:
+        if skill not in allowed_skills and skill not in _GENERIC_SKILLS:
             return f"引入了简历中不存在的技能「{skill}」"
 
     return None
