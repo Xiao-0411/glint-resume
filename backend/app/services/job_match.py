@@ -100,6 +100,13 @@ def extract_resume_skills(resume: Optional[Dict]) -> ResumeSkills:
 # 一份覆盖了全部核心要求的简历会因为没写"沟通能力"而被判低匹配。
 DESC_ONLY_WEIGHT = 0.35
 
+# 通用职业素质。实测真实语料中 36% 的 JD 会写"沟通能力/团队协作",
+# 但简历里几乎没人把它们列进技能栏 —— 当作硬性技能来算,等于给每个人
+# 无差别扣分,还会把"缺沟通能力"当成待补足技能提示出来,毫无指导意义。
+# 保留在要求列表里(JD 确实写了),但权重压到很低。
+_SOFT_SKILLS = {"沟通能力", "团队协作"}
+SOFT_SKILL_WEIGHT = 0.15
+
 
 def job_required_skills(job: Dict) -> Tuple[List[str], List[str]]:
     """
@@ -167,6 +174,8 @@ def match_resume_to_job(
             base = 1.0
         else:
             base = profile.weight_of(skill) or profile.neutral_weight()
+        if skill in _SOFT_SKILLS:
+            return base * SOFT_SKILL_WEIGHT
         return base if is_core else base * DESC_ONLY_WEIGHT
 
     core_set = set(core)
@@ -189,7 +198,8 @@ def match_resume_to_job(
 
     # 缺失技能按市场权重排序 —— 先补最多 JD 要求的那个
     missing.sort(key=lambda kv: -kv[1])
-    missing_skills = [s for s, _ in missing]
+    # "待补足技能"里不列通用素质 —— 提示用户"去补沟通能力"没有任何可执行性
+    missing_skills = [s for s, _ in missing if s not in _SOFT_SKILLS]
 
     if score >= LEVEL_GREEN_MIN:
         level = "green"
@@ -197,12 +207,15 @@ def match_resume_to_job(
     elif score >= LEVEL_YELLOW_MIN:
         level = "yellow"
         hit = "、".join(matched[:2]) if matched else "部分基础技能"
+        # 缺口可能为空(剩下的都是被过滤掉的通用素质),此时不能拼出"补足「」"
         gap = "、".join(missing_skills[:2])
-        reasons = f"已具备「{hit}」，建议补足「{gap}」后投递"
+        reasons = (f"已具备「{hit}」，建议补足「{gap}」后投递" if gap
+                   else f"已具备「{hit}」，与该岗位要求基本吻合")
     else:
         level = "red"
         gap = "、".join(missing_skills[:3])
-        reasons = f"核心要求「{gap}」在你的简历中暂未体现"
+        reasons = (f"核心要求「{gap}」在你的简历中暂未体现" if gap
+                   else "简历与该岗位要求的重合度较低")
 
     return {
         "score": score,
