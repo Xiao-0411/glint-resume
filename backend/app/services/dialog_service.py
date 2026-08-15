@@ -379,10 +379,42 @@ async def chat_stream(
             full_reply_parts.append(delta)
             yield ("delta", json.dumps({"text": delta}, ensure_ascii=False))
     except llm_service.LLMError as e:
+        # 已经吐给用户的内容收不回来。若此时中断(常见于网络抖动或
+        # 45s 流式超时),把已收到的半截保住并说明情况,
+        # 比让上层用 mock 整段覆盖要诚实 —— 用户屏幕上那半句是真实生成的。
+        partial = "".join(full_reply_parts).strip()
+        if partial:
+            note = "\n\n（回复生成中断，你可以让我“继续”把剩下的说完）"
+            session_store.append_message(session_id, "assistant", partial + note)
+            logger.warning("chat_stream_interrupted", extra={
+                "session_id": session_id,
+                "partial_len": len(partial),
+                "error": str(e),
+            })
+            yield ("delta", json.dumps({"text": note}, ensure_ascii=False))
+            yield (
+                "done",
+                json.dumps({
+                    "stage": next_stage,
+                    "stage_label": STAGE_LABELS.get(next_stage, ""),
+                    "quick_replies": quick_replies,
+                    "extracted": (session_store.get(session_id) or {}).get("extracted", {}),
+                    "interrupted": True,
+                }, ensure_ascii=False)
+            )
+            return
         yield ("error", json.dumps({"message": str(e)}, ensure_ascii=False))
         return
 
     full_reply = "".join(full_reply_parts).strip()
+    # 上游在长度上限处截断时,回复会停在半句话。补一句说明,
+    # 否则用户看到的就是没头没尾的一截,还以为是产品坏了。
+    truncated = llm_service.was_truncated()
+    if truncated and full_reply:
+        note = "\n\n（回复超出长度上限被截断，你可以让我“继续”把剩下的说完）"
+        full_reply += note
+        yield ("delta", json.dumps({"text": note}, ensure_ascii=False))
+
     session_store.append_message(session_id, "assistant", full_reply)
 
     # ⚠️ 增量提取:如果 AI 刚做完 recap(包含确认信号),尝试提取该阶段数据
@@ -391,6 +423,7 @@ async def chat_stream(
         "stage": next_stage,
         "has_recap": has_recap,
         "reply_len": len(full_reply),
+        "truncated": truncated,
     })
     if has_recap:
         await _incremental_extract(session_id, next_stage, full_reply)

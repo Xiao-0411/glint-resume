@@ -27,6 +27,20 @@ class LLMQuotaExceeded(LLMError):
 
 _usage_context = ContextVar("llm_usage_context", default={})
 
+# 最近一次流式调用的结束原因。用 ContextVar 而不是全局变量,
+# 保证并发请求之间互不干扰。
+_last_stop_reason: ContextVar[Optional[str]] = ContextVar(
+    "llm_last_stop_reason", default=None
+)
+
+
+def was_truncated() -> bool:
+    """上一次 chat_stream 是否因为长度上限被上游截断。
+
+    调用方在流结束后立即查询;半截回复不能当成完整回复交给用户。
+    """
+    return _last_stop_reason.get() == "max_tokens"
+
 
 @contextmanager
 def usage_context(
@@ -189,6 +203,9 @@ async def chat_stream(
     if not settings.LLM_API_KEY:
         raise LLMError("LLM_API_KEY 未配置")
 
+    # 每次调用先清掉上一次的结束原因,避免串味
+    _last_stop_reason.set(None)
+
     url = f"{settings.LLM_BASE_URL}/messages"
     payload = _build_payload(messages, system, max_tokens, temperature, stream=True, model=model)
     estimated_prompt_tokens = _enforce_usage_quota(messages, system, payload)
@@ -196,12 +213,21 @@ async def chat_stream(
     prompt_tokens = estimated_prompt_tokens
     completion_tokens = 0
     text_parts: List[str] = []
+    stop_reason: Optional[str] = None
     completed = False
 
     for attempt in range(settings.LLM_MAX_RETRIES + 1):
         is_last = attempt == settings.LLM_MAX_RETRIES
         retryable_error = None
-        async with httpx.AsyncClient(timeout=request_timeout) as client:
+        # 流式请求的超时语义和普通请求不同:read 超时应当约束"两个数据块之间
+        # 的静默时长",而不是整段回复的总时长。传一个裸 float 会让 httpx 把它
+        # 用作每一步的超时,长回复写到一半就被掐断 —— 用户看到的就是半句话。
+        # 因此显式放宽 read,connect/write 仍保持原值。
+        stream_timeout = httpx.Timeout(
+            request_timeout,
+            read=max(request_timeout, settings.LLM_STREAM_READ_TIMEOUT_SECONDS),
+        )
+        async with httpx.AsyncClient(timeout=stream_timeout) as client:
             try:
                 async with client.stream(
                     "POST", url, headers=_build_headers(), json=payload
@@ -248,6 +274,13 @@ async def chat_stream(
                                         if text:
                                             text_parts.append(text)
                                             yield text
+                                # 结束原因:上游可能在 max_tokens 处硬截断。
+                                # 不记下来的话,半截回复会被当成正常回复发给用户,
+                                # 用户看到的就是一句话说到一半没了(且毫无提示)。
+                                elif data.get("type") == "message_delta":
+                                    reason = (data.get("delta") or {}).get("stop_reason")
+                                    if reason:
+                                        stop_reason = reason
                                 # 错误事件
                                 elif data.get("type") == "error":
                                     err = data.get("error", {})
@@ -287,6 +320,16 @@ async def chat_stream(
         })
 
     if completed:
+        if stop_reason == "max_tokens":
+            # 上游在长度上限处硬截断。异步生成器没法优雅地返回值,
+            # 用 ContextVar 把状态交给调用方(见 was_truncated),
+            # 由它决定是提示用户还是续写 —— 但绝不能装作回复是完整的。
+            _last_stop_reason.set(stop_reason)
+            logger.warning("llm_stream_truncated", extra={
+                "model": payload.get("model", ""),
+                "completion_tokens": completion_tokens,
+                "max_tokens": payload.get("max_tokens"),
+            })
         _record_usage(
             payload=payload,
             prompt_tokens=prompt_tokens,

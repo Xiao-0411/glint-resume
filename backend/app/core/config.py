@@ -23,6 +23,13 @@ class Settings:
     # 前端 240s 超时，留出兜底与响应回传的余量。
     LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
     LLM_TIMEOUT_FAST_SECONDS: float = float(os.getenv("LLM_TIMEOUT_FAST_SECONDS", "45"))
+    # 流式回复两个数据块之间允许的最大静默时长。
+    # 对话接口用的 FAST 超时是 45 秒,但那是"整条请求"的预算;
+    # 流式场景下只要还在持续吐字就不该判超时,否则长回复会被从中间掐断,
+    # 用户看到的是半句话。这里单独给 read 一个更宽的值。
+    LLM_STREAM_READ_TIMEOUT_SECONDS: float = float(
+        os.getenv("LLM_STREAM_READ_TIMEOUT_SECONDS", "120")
+    )
     # 网关偶发 5xx/超时，重试一次即可救回大部分请求
     LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
     LLM_USAGE_ENABLED: bool = os.getenv("LLM_USAGE_ENABLED", "true").lower() == "true"
