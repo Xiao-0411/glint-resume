@@ -265,6 +265,14 @@ async function sendUserMessage(text) {
         },
         onError: (err) => {
           aiThinking.value = false
+          // 登录态失效：清掉过期 token 并直接唤起登录框，
+          // 光提示"请重新登录"用户还得自己去找入口。
+          if (err?.status === 401) {
+            auth.logout()
+            store.pushMessage('ai', '登录已过期，请重新登录后继续对话。')
+            auth.requireLogin()
+            return
+          }
           if (aiIdx === -1) {
             store.pushMessage('ai', `抱歉，出了点问题：${err.message || '请稍后重试'}`)
           } else {

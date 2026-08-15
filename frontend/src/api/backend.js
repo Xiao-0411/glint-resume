@@ -173,6 +173,20 @@ export async function sendChatStream(payload, handlers = {}) {
   }
 
   if (!response.ok) {
+    // 401/403 是登录态问题，"后端返回 401"对用户毫无意义，
+    // 要直接说清该做什么。其余状态码保留原样便于排查。
+    if (response.status === 401) {
+      const err = new Error('登录已过期，请重新登录后继续')
+      err.status = 401
+      handlers.onError?.(err)
+      return
+    }
+    if (response.status === 403) {
+      const err = new Error('账号无权访问，请联系管理员')
+      err.status = 403
+      handlers.onError?.(err)
+      return
+    }
     handlers.onError?.(new Error(`后端返回 ${response.status}`))
     return
   }
