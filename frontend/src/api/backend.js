@@ -66,6 +66,55 @@ export async function getCurrentUser() {
   return data
 }
 
+/**
+ * 个人中心 —— 更新昵称 / 头像
+ */
+export async function updateProfile(payload) {
+  const body = {}
+  // 只提交真正要改的字段：后端把 null 当作"不改"
+  if (payload.displayName !== undefined) body.display_name = payload.displayName
+  if (payload.avatar !== undefined) body.avatar = payload.avatar
+  const { data } = await http.patch('/api/profile', body)
+  return data
+}
+
+/**
+ * 上传头像图片，返回更新后的用户对象
+ */
+export async function uploadAvatar(file) {
+  const form = new FormData()
+  form.append('file', file)
+  // 显式清掉默认的 application/json，让浏览器自己带 multipart boundary
+  const { data } = await http.post('/api/profile/avatar', form, {
+    headers: { 'Content-Type': undefined }
+  })
+  return data
+}
+
+export async function changePassword(payload) {
+  const { data } = await http.post('/api/profile/password', {
+    current_password: payload.currentPassword,
+    new_password: payload.newPassword
+  })
+  return data
+}
+
+export async function getProfileStats() {
+  const { data } = await http.get('/api/profile/stats')
+  return data
+}
+
+/**
+ * 头像相对路径 → 可直接放进 img src 的绝对地址
+ */
+export function resolveAssetUrl(path) {
+  if (!path) return ''
+  if (/^https?:\/\//i.test(path) || path.startsWith('data:')) return path
+  // 去掉 baseURL 末尾的 /，否则拼出 //uploads/... 匹配不到后端挂载点
+  const base = BASE_URL.replace(/\/+$/, '')
+  return `${base}${path.startsWith('/') ? path : `/${path}`}`
+}
+
 export async function attachSession(payload) {
   const { data } = await http.post('/api/sessions/attach', {
     session_id: payload.sessionId,

@@ -206,6 +206,8 @@ def _to_auth_user(user: User) -> AuthUser:
         name=user.display_name or user.email or "",
         role=user.role or "user",
         is_active=bool(user.is_active),
+        avatar=user.avatar or "",
+        created_at=user.created_at.isoformat() if user.created_at else None,
     )
 
 def _display_name_from_account(account: str) -> str:

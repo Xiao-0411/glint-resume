@@ -32,6 +32,12 @@ const routes = [
     meta: { transition: 'fade' }
   },
   {
+    path: '/profile',
+    name: 'profile',
+    component: () => import('@/views/ProfileView.vue'),
+    meta: { transition: 'fade' }
+  },
+  {
     path: '/admin/users',
     name: 'admin-users',
     component: () => import('@/views/AdminUsersView.vue'),

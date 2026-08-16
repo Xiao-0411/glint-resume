@@ -36,6 +36,27 @@ class AuthUser(BaseModel):
     name: str = ""
     role: str = "user"
     is_active: bool = True
+    avatar: str = ""
+    created_at: Optional[str] = None
+
+
+class ProfileUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=128)
+    avatar: Optional[str] = Field(None, max_length=512)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=1, max_length=128)
+
+
+class ProfileStats(BaseModel):
+    resume_count: int = 0
+    best_score: Optional[int] = None
+    average_score: Optional[float] = None
+    application_count: int = 0
+    interview_count: int = 0
+    last_resume_at: Optional[str] = None
 
 
 class AuthResponse(BaseModel):

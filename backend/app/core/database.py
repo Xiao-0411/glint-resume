@@ -68,6 +68,8 @@ def _ensure_schema_updates():
         if "is_active" not in user_columns:
             conn.execute(text("ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1"))
             conn.execute(text("CREATE INDEX ix_users_is_active ON users (is_active)"))
+        if "avatar" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN avatar VARCHAR(512) NULL"))
 
     _ensure_super_admin()
 
