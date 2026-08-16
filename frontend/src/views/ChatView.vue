@@ -126,6 +126,7 @@ import { chatApi, resumeApi } from '@/api'
 import ChatBubble from '@/components/ChatBubble.vue'
 import LoadingOverlay from '@/components/LoadingOverlay.vue'
 import LiveResumePreview from '@/components/LiveResumePreview.vue'
+import { sectionsFromProfile, sectionsFromStage } from '@/utils/resumeSections'
 
 const router = useRouter()
 const store = useChatStore()
@@ -156,17 +157,13 @@ const lastAiIdx = computed(() => {
   return -1
 })
 
-// 当前 stage -> 已完成的简历 section 列表
-// 用户确认后才填入：当 AI 进入下一 stage,意味着上一 stage 用户已输入
+// 已解锁的简历 section
+// 优先看后端真实抽取到的数据：抽到什么就立刻渲染什么,不必等用户对 recap 说"确认"
+// 把 stage 推进 —— 否则用户已经答完基本信息,右侧却仍是"简历还是空白的"。
+// 没有真实数据时(mock 模式)才回落到按 stage 解锁样例排版。
 const completedSections = computed(() => {
-  const stage = store.currentStage
-  if (stage === 'basic_info') return []
-  if (stage === 'education') return ['basic']
-  if (stage === 'experience_mining') return ['basic', 'education']
-  if (stage === 'skills') return ['basic', 'education', 'experiences']
-  if (stage === 'awards') return ['basic', 'education', 'experiences', 'skills']
-  if (stage === 'ready_to_generate') return ['basic', 'education', 'experiences', 'skills', 'awards']
-  return []
+  const fromProfile = sectionsFromProfile(store.extractedProfile)
+  return fromProfile.length ? fromProfile : sectionsFromStage(store.currentStage)
 })
 
 function stepStatus(idx) {

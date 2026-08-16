@@ -104,22 +104,10 @@
             <span>专业技能</span>
           </h2>
           <div class="skill-grid">
-            <div class="skill-row">
-              <span class="skill-label">技术栈</span>
+            <div v-for="row in skillRows" :key="row.key" class="skill-row">
+              <span class="skill-label">{{ row.label }}</span>
               <div class="skill-chips">
-                <span v-for="s in displayResume.skills.technical" :key="s" class="chip">{{ s }}</span>
-              </div>
-            </div>
-            <div class="skill-row">
-              <span class="skill-label">产品能力</span>
-              <div class="skill-chips">
-                <span v-for="s in displayResume.skills.product" :key="s" class="chip">{{ s }}</span>
-              </div>
-            </div>
-            <div class="skill-row">
-              <span class="skill-label">软技能</span>
-              <div class="skill-chips">
-                <span v-for="s in displayResume.skills.soft" :key="s" class="chip">{{ s }}</span>
+                <span v-for="s in row.items" :key="s" class="chip">{{ s }}</span>
               </div>
             </div>
           </div>
@@ -159,6 +147,7 @@
 <script setup>
 import { computed } from 'vue'
 import { buildMockResume } from '@/api/mock'
+import { hasRealProfile } from '@/utils/resumeSections'
 
 const props = defineProps({
   targetJob: { type: String, default: '' },
@@ -167,19 +156,10 @@ const props = defineProps({
   profile: { type: Object, default: () => ({}) }
 })
 
-// 是否拿到了后端真实数据(任一关键字段非空)
-const hasReal = computed(() => {
-  const p = props.profile || {}
-  const skills = p.skills || {}
-  return !!(
-    p.fullname ||
-    (Array.isArray(p.education) && p.education.length) ||
-    (Array.isArray(p.experiences) && p.experiences.length) ||
-    (Array.isArray(skills.technical) && skills.technical.length) ||
-    (Array.isArray(skills.soft) && skills.soft.length) ||
-    (Array.isArray(p.awards) && p.awards.length)
-  )
-})
+// 是否拿到了后端真实数据
+// 判定与 completedSections 共用 hasRealProfile,避免出现「section 已解锁但这里仍
+// 回落到 mock 样例」——那会在用户已填真实信息时渲染出示例姓名。
+const hasReal = computed(() => hasRealProfile(props.profile))
 
 // 抽取阶段经历还没有 bullets,临时用 STAR-L 要点展示
 function starlToBullets(star) {
@@ -208,6 +188,7 @@ function mapProfile(p) {
     })),
     skills: {
       technical: (p.skills && p.skills.technical) || [],
+      tools: (p.skills && p.skills.tools) || [],
       product: (p.skills && p.skills.product) || [],
       soft: (p.skills && p.skills.soft) || []
     },
@@ -218,6 +199,20 @@ function mapProfile(p) {
 // 真实模式渲染真实数据;否则(mock 模式)回落到样例排版
 const displayResume = computed(() => hasReal.value ? mapProfile(props.profile) : buildMockResume(props.targetJob))
 const previewLabel = computed(() => hasReal.value ? '实时预览 · 随对话自动填充' : '排版预览 · 示例')
+
+// 只渲染有内容的技能分类,避免出现「技术栈」「产品能力」这样的空标签行
+const SKILL_CATEGORIES = [
+  { key: 'technical', label: '技术栈' },
+  { key: 'tools', label: '工具' },
+  { key: 'product', label: '产品能力' },
+  { key: 'soft', label: '软技能' }
+]
+
+const skillRows = computed(() =>
+  SKILL_CATEGORIES
+    .map(c => ({ ...c, items: displayResume.value.skills[c.key] || [] }))
+    .filter(c => c.items.length)
+)
 
 function has(key) {
   return props.completedSections.includes(key)
