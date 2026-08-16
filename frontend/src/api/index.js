@@ -15,6 +15,11 @@ import {
   sendEmailCode,
   registerAccount,
   getCurrentUser,
+  updateProfile,
+  uploadAvatar,
+  changePassword,
+  getProfileStats,
+  resolveAssetUrl,
   attachSession,
   getLatestSession,
   listResumes,
@@ -102,6 +107,21 @@ export const authApi = {
   register: registerAccount,
   me: getCurrentUser
 }
+
+// ============ 个人中心 ============
+
+const notAvailableInMock = () =>
+  Promise.reject(new Error('演示模式下不支持该操作，请连接后端后再试'))
+
+export const profileApi = {
+  update: (payload) => USE_BACKEND ? updateProfile(payload) : notAvailableInMock(),
+  uploadAvatar: (file) => USE_BACKEND ? uploadAvatar(file) : notAvailableInMock(),
+  changePassword: (payload) => USE_BACKEND ? changePassword(payload) : notAvailableInMock(),
+  stats: () => USE_BACKEND ? getProfileStats() : Promise.resolve(null)
+}
+
+// 头像等静态资源地址解析（mock 模式下原样返回）
+export { resolveAssetUrl }
 
 // ============ 会话 ============
 

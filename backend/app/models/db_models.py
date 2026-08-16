@@ -24,6 +24,7 @@ class User(Base):
     id = Column(String(64), primary_key=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
     display_name = Column(String(128), default="")
+    avatar = Column(String(512), default="", comment="头像地址，站内上传为 /uploads/avatars/xxx")
     password_hash = Column(String(255), nullable=True)
     role = Column(String(32), nullable=False, default="user", index=True)
     is_active = Column(Boolean, nullable=False, default=True, index=True)

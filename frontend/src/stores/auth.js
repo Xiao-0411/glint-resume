@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { apiMode, authApi, resumeApi } from '@/api'
+import { apiMode, authApi, profileApi, resumeApi } from '@/api'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref(null)
@@ -88,8 +88,11 @@ export const useAuthStore = defineStore('auth', () => {
       localStorage.setItem('auth_user', JSON.stringify(user.value))
       await loadHistory()
       return user.value
-    } catch {
-      logout()
+    } catch (e) {
+      // 只有后端明确说"你没登录/没权限"才登出。
+      // 网络抖动、后端重启期间的 502 不该把用户踢下线。
+      const code = e?.response?.status
+      if (code === 401 || code === 403) logout()
       return null
     }
   }
@@ -115,7 +118,39 @@ export const useAuthStore = defineStore('auth', () => {
       name: raw?.name || raw?.email || '用户',
       role: raw?.role || 'user',
       isActive: raw?.is_active ?? raw?.isActive ?? true,
-      avatar: raw?.avatar || ''
+      avatar: raw?.avatar || '',
+      createdAt: raw?.created_at || raw?.createdAt || ''
+    }
+  }
+
+  /** 个人中心改完资料后统一回写本地缓存 */
+  function applyUpdatedUser(raw) {
+    user.value = normalizeUser(raw)
+    localStorage.setItem('auth_user', JSON.stringify(user.value))
+    return user.value
+  }
+
+  async function updateProfile(payload) {
+    try {
+      return applyUpdatedUser(await profileApi.update(payload))
+    } catch (e) {
+      throw new Error(toAuthErrorMessage(e, '资料更新失败，请稍后重试'))
+    }
+  }
+
+  async function uploadAvatar(file) {
+    try {
+      return applyUpdatedUser(await profileApi.uploadAvatar(file))
+    } catch (e) {
+      throw new Error(toAuthErrorMessage(e, '头像上传失败，请稍后重试'))
+    }
+  }
+
+  async function changePassword(payload) {
+    try {
+      return await profileApi.changePassword(payload)
+    } catch (e) {
+      throw new Error(toAuthErrorMessage(e, '密码修改失败，请稍后重试'))
     }
   }
 
@@ -266,6 +301,9 @@ export const useAuthStore = defineStore('auth', () => {
     sendEmailCode,
     register,
     refreshCurrentUser,
+    updateProfile,
+    uploadAvatar,
+    changePassword,
     logout,
     loadHistory,
     addResumeToHistory,

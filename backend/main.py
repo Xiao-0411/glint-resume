@@ -5,15 +5,17 @@
 import logging
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.core.database import init_db
 from app.core.logging_config import setup_logging
-from app.api import admin, auth, chat, resume, evaluation, jobs, sessions, usage
+from app.api import admin, auth, chat, resume, evaluation, jobs, profile, sessions, usage
 
 # 结构化日志初始化
 setup_logging(level=settings.LOG_LEVEL)
@@ -65,6 +67,13 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if request.url.path.startswith("/uploads/"):
+        # 用户上传的文件即使通过了图片magic校验，也不该带任何脚本能力。
+        # 收紧成 none + sandbox，比站点默认策略更严。
+        response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        # 允许跨源 <img> 读取:前端在 Pages,后端在 api.sgjl.cloud,不同源。
+        response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+        return response
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
@@ -124,6 +133,7 @@ async def rate_limit(request: Request, call_next):
     return await call_next(request)
 
 app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(profile.router, prefix="/api", tags=["profile"])
 app.include_router(admin.router, prefix="/api", tags=["admin"])
 app.include_router(sessions.router, prefix="/api", tags=["sessions"])
 app.include_router(usage.router, prefix="/api", tags=["usage"])
@@ -131,6 +141,12 @@ app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(resume.router, prefix="/api", tags=["resume"])
 app.include_router(evaluation.router, prefix="/api", tags=["evaluation"])
 app.include_router(jobs.router, prefix="/api", tags=["jobs"])
+
+# 用户上传的头像等静态资源。目录可能还不存在（首次部署未上传过头像），
+# 先建出来再挂载，否则 StaticFiles 会在启动时直接抛错。
+UPLOAD_DIR = Path(__file__).resolve().parent / "uploads"
+(UPLOAD_DIR / "avatars").mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 @app.get("/")

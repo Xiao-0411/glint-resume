@@ -73,7 +73,7 @@ if not exist "%VENV_PYTHON%" (
         exit /b 1
     )
 )
-"%VENV_PYTHON%" -c "import fastapi" 2>nul
+"%VENV_PYTHON%" -c "import fastapi, multipart" 2>nul
 if !errorlevel! neq 0 (
     echo Installing backend dependencies...
     "%VENV_PYTHON%" -m pip install -r "%BACKEND_DIR%\requirements.txt" -q

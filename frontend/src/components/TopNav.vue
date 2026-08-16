@@ -40,9 +40,16 @@
         <template v-if="auth.isLoggedIn">
           <div class="user-dropdown" ref="dropdownRef">
             <button class="user-btn" @click="showDropdown = !showDropdown">
-              <span class="user-avatar">{{ auth.user?.name?.charAt(0)?.toUpperCase() || 'U' }}</span>
+              <img v-if="avatarUrl" :src="avatarUrl" class="user-avatar user-avatar-img" alt="头像" />
+              <span v-else class="user-avatar">{{ auth.user?.name?.charAt(0)?.toUpperCase() || 'U' }}</span>
             </button>
             <div v-if="showDropdown" class="dropdown-menu">
+              <router-link to="/profile" class="dropdown-item" @click="showDropdown = false">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                </svg>
+                个人中心
+              </router-link>
               <div class="dropdown-item" @click="openHistory">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
@@ -79,13 +86,15 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import LoginDialog from '@/components/LoginDialog.vue'
 import ResumeHistoryDialog from '@/components/ResumeHistoryDialog.vue'
 import BrandMark from '@/components/BrandMark.vue'
+import { resolveAssetUrl } from '@/api'
 
 const auth = useAuthStore()
+const avatarUrl = computed(() => resolveAssetUrl(auth.user?.avatar))
 const showDropdown = ref(false)
 const showHistory = ref(false)
 const dropdownRef = ref(null)
@@ -310,6 +319,10 @@ onUnmounted(() => window.removeEventListener('click', handleClickOutside))
 
 .user-avatar:hover {
   transform: scale(1.1);
+}
+
+.user-avatar-img {
+  object-fit: cover;
 }
 
 .dropdown-menu {
