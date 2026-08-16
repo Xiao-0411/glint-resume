@@ -20,17 +20,22 @@ ZHIPIN_JOB_URL = "https://www.zhipin.com/job_detail/{}.html"
 class ZhipinCrawler(BaseCrawler):
     platform = "zhipin"
     base_url = "https://www.zhipin.com"
+    last_error = ""
 
     def _default_headers(self) -> dict:
         h = super()._default_headers()
         h.update({
             "Referer": "https://www.zhipin.com/web/geek/job",
             "Origin": "https://www.zhipin.com",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         })
         return h
 
     async def crawl(self, keywords: List[str] = None) -> List[dict]:
         """抓取 Boss直聘 职位"""
+        self.last_error = ""
         keywords = keywords or JOB_KEYWORDS
         all_jobs = []
         seen = set()
@@ -49,6 +54,8 @@ class ZhipinCrawler(BaseCrawler):
                 continue
 
         logger.info("zhipin_crawl_done", extra={"total": len(all_jobs)})
+        if not all_jobs and self.last_error:
+            raise RuntimeError(self.last_error)
         return all_jobs
 
     async def _search_keyword(self, keyword: str, page: int = 1) -> List[dict]:
@@ -62,12 +69,22 @@ class ZhipinCrawler(BaseCrawler):
         }
         try:
             resp = await self._get(ZHIPIN_SEARCH_URL, params=params)
-            data = resp.json()
-            if data.get("code") != 0:
-                logger.warning("zhipin_api_error", extra={"code": data.get("code"), "msg": data.get("message")})
+            try:
+                data = resp.json()
+            except ValueError:
+                self.last_error = f"invalid_json(status={resp.status_code})"
+                logger.warning("zhipin_invalid_json", extra={"status": resp.status_code})
                 return jobs
 
-            job_list = data.get("zpData", {}).get("jobList", [])
+            if str(data.get("code", "")) not in ("0", "200"):
+                self.last_error = f"api_error(code={data.get('code')}, message={data.get('message', data.get('msg', ''))})"
+                logger.warning("zhipin_api_error", extra={"code": data.get("code"), "msg": data.get("message", data.get("msg"))})
+                return jobs
+
+            payload = data.get("zpData") or data.get("data") or {}
+            job_list = payload if isinstance(payload, list) else (
+                payload.get("jobList") or payload.get("joblist") or payload.get("list") or []
+            )
             for item in job_list:
                 try:
                     job = self._parse_job_item(item)
@@ -78,6 +95,7 @@ class ZhipinCrawler(BaseCrawler):
                     continue
 
         except Exception as e:
+            self.last_error = str(e)
             logger.warning("zhipin_search_failed", extra={"keyword": keyword, "error": str(e)})
 
         return jobs

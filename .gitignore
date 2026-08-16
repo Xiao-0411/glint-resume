@@ -30,4 +30,6 @@ dist/
 Thumbs.db
 
 # ===== 工具目录 =====
+.claude/
 .claude/worktrees/
+.crawler_chrome_profile/

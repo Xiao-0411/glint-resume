@@ -1,7 +1,7 @@
 """
 职位爬虫 - 独立运行入口
 启动:  python run_crawler.py
-每 2 小时自动抓取 Boss直聘/智联招聘/猎聘 的职位数据并存入 MySQL
+启动可见浏览器完成三个平台登录后，每 2 小时抓取职位数据并存入 MySQL
 """
 import asyncio
 import sys
@@ -15,7 +15,7 @@ from app.crawlers.scheduler import run_scheduler
 
 if __name__ == "__main__":
     setup_logging(level="INFO")
-    print("🚀 职位爬虫调度器启动，每 2 小时自动抓取一次...")
+    print("🚀 职位爬虫调度器启动，将连接已登录的 Chrome，每 2 小时抓取一次...")
     print("   按 Ctrl+C 停止")
     try:
         asyncio.run(run_scheduler())

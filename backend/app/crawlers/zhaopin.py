@@ -20,17 +20,23 @@ ZHAOPIN_JOB_URL = "https://jobs.zhaopin.com/{}.htm"
 class ZhaopinCrawler(BaseCrawler):
     platform = "zhaopin"
     base_url = "https://www.zhaopin.com"
+    last_error = ""
 
     def _default_headers(self) -> dict:
         h = super()._default_headers()
         h.update({
             "Referer": "https://www.zhaopin.com/",
             "Origin": "https://www.zhaopin.com",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+            "X-Requested-With": "XMLHttpRequest",
         })
         return h
 
     async def crawl(self, keywords: List[str] = None) -> List[dict]:
         """抓取智联招聘职位"""
+        self.last_error = ""
         keywords = keywords or JOB_KEYWORDS
         all_jobs = []
         seen = set()
@@ -49,6 +55,8 @@ class ZhaopinCrawler(BaseCrawler):
                 continue
 
         logger.info("zhaopin_crawl_done", extra={"total": len(all_jobs)})
+        if not all_jobs and self.last_error:
+            raise RuntimeError(self.last_error)
         return all_jobs
 
     async def _search_keyword(self, keyword: str, page: int = 1) -> List[dict]:
@@ -62,12 +70,23 @@ class ZhaopinCrawler(BaseCrawler):
         }
         try:
             resp = await self._get(ZHAOPIN_SEARCH_URL, params=params)
-            data = resp.json()
-            if data.get("code") != 200:
-                logger.warning("zhaopin_api_error", extra={"code": data.get("code"), "msg": data.get("message")})
+            try:
+                data = resp.json()
+            except ValueError:
+                self.last_error = f"invalid_json(status={resp.status_code})"
+                logger.warning("zhaopin_invalid_json", extra={"status": resp.status_code})
                 return jobs
 
-            results = data.get("data", {}).get("results", [])
+            code = data.get("code", data.get("status", data.get("flag")))
+            if str(code) not in ("200", "0", "1", "true", "True"):
+                self.last_error = f"api_error(code={code}, message={data.get('message', data.get('msg', ''))})"
+                logger.warning("zhaopin_api_error", extra={"code": code, "msg": data.get("message", data.get("msg"))})
+                return jobs
+
+            payload = data.get("data") or data.get("result") or {}
+            results = payload if isinstance(payload, list) else (
+                payload.get("results") or payload.get("positionList") or payload.get("list") or []
+            )
             for item in results:
                 try:
                     job = self._parse_job_item(item)
@@ -78,6 +97,7 @@ class ZhaopinCrawler(BaseCrawler):
                     continue
 
         except Exception as e:
+            self.last_error = str(e)
             logger.warning("zhaopin_search_failed", extra={"keyword": keyword, "error": str(e)})
 
         return jobs

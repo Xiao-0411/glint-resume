@@ -127,7 +127,7 @@ if !errorlevel! neq 0 (
 echo [OK] Frontend started
 
 echo [Extra] Starting Job Crawler (every 2 hours)...
-start "GlintCrawler" /MIN cmd /c "cd /d "%BACKEND_DIR%" && "%VENV_PYTHON%" run_crawler.py"
+start "GlintCrawler - Login Required" cmd /k "cd /d "%BACKEND_DIR%" && "%VENV_PYTHON%" run_crawler.py"
 echo [OK] Crawler started
 echo.
 

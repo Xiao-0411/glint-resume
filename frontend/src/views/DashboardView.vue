@@ -54,6 +54,15 @@
           <span class="legend-item"><span class="dot red"></span>低匹配 暂不建议</span>
         </div>
 
+        <div v-if="crawlerStatuses.length" class="crawler-status-bar">
+          <span class="crawler-status-title">数据渠道</span>
+          <span v-for="item in crawlerStatuses" :key="item.platform" class="crawler-status-item">
+            <span :class="['crawler-status-dot', item.status]"></span>
+            {{ item.label }} {{ crawlerStatusLabel(item.status) }}
+            <small v-if="item.lastJobCount">{{ item.lastJobCount }} 条</small>
+          </span>
+        </div>
+
         <!-- 无简历提示：可浏览职位，但投递 / 适配需先创建简历 -->
         <div v-if="!hasResume" class="no-resume-banner">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -74,7 +83,7 @@
           <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" class="empty-icon">
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
-          <p class="empty-text">点击"搜索职位"，AI 将智能匹配你的简历与合适岗位</p>
+          <p class="empty-text">{{ searchMessage }}</p>
         </div>
 
         <!-- 结果列表 -->
@@ -95,6 +104,7 @@
                     <span class="job-sep">·</span>
                     <span class="job-location">{{ job.location }}</span>
                     <span v-for="tag in job.tags" :key="tag" class="job-tag">{{ tag }}</span>
+                    <span v-if="job.platform" class="job-source">{{ platformLabel(job.platform) }}</span>
                   </div>
                 </div>
                 <div class="job-top-right">
@@ -108,6 +118,10 @@
               </div>
 
               <p class="job-desc">{{ job.description }}</p>
+              <div v-if="job.crawledAt || job.url" class="job-freshness">
+                <span v-if="job.crawledAt">抓取于 {{ formatDateTime(job.crawledAt) }}</span>
+                <a v-if="job.url" :href="job.url" target="_blank" rel="noopener noreferrer" @click.stop>查看原始职位</a>
+              </div>
 
               <!-- 匹配理由 -->
               <div class="match-reason">
@@ -812,6 +826,8 @@ const hasResume = computed(() => !!chatStore.resumeData || auth.resumeHistory.le
 
 const activeTab = ref('search')
 const searchKeyword = ref('')
+const searchMessage = ref('输入关键词搜索真实职位，结果来自招聘平台实时数据')
+const crawlerStatuses = ref([])
 const appliedJobIds = reactive({})
 
 // 职位详情整页
@@ -905,12 +921,25 @@ async function onSearch() {
       keyword: searchKeyword.value,
       targetJob: chatStore.targetJob
     })
-    huntStore.setMatchedJobs(result.jobs)
+    huntStore.setMatchedJobs(result.jobs || [])
+    searchMessage.value = result.message || (result.source === 'live_unavailable'
+      ? '实时职位暂时不可用，请稍后重试'
+      : '暂无匹配的真实职位，请更换关键词后重试')
   } catch (e) {
     showToast('搜索失败，请重试', 'error')
   } finally {
     huntStore.setSearchLoading(false)
   }
+}
+
+function platformLabel(platform) {
+  return { zhipin: 'BOSS直聘', zhaopin: '智联招聘', liepin: '猎聘' }[platform] || platform
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString('zh-CN', { hour12: false })
 }
 
 async function onAdaptResume(job) {
@@ -984,6 +1013,7 @@ function formatDate(iso) {
 }
 
 onMounted(() => {
+  jobHuntApi.getCrawlerStatus().then(data => { crawlerStatuses.value = data.platforms || [] }).catch(() => {})
   // 没有简历时不加载演示投递记录，保持真实空态，
   // 避免"没简历却有 5 条投递记录"的矛盾
   if (!hasResume.value) {
@@ -994,6 +1024,10 @@ onMounted(() => {
   if (!auth.isLoggedIn) return
   loadApplications()
 })
+
+function crawlerStatusLabel(status) {
+  return { success: '正常', running: '抓取中', empty: '无结果', failed: '失败', never: '未运行' }[status] || status
+}
 </script>
 
 <style scoped>
@@ -1130,6 +1164,22 @@ onMounted(() => {
   color: var(--color-text-muted);
 }
 .legend-item { display: flex; align-items: center; gap: 8px; }
+.crawler-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: -8px 0 22px;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+.crawler-status-title { font-weight: 700; color: var(--color-text-secondary); }
+.crawler-status-item { display: inline-flex; align-items: center; gap: 6px; }
+.crawler-status-item small { color: var(--color-text-faint); }
+.crawler-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+.crawler-status-dot.success { background: #10b981; }
+.crawler-status-dot.running { background: #f59e0b; }
+.crawler-status-dot.empty, .crawler-status-dot.failed { background: #ef4444; }
 .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
 .dot.green { background: #10B981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15); }
 .dot.yellow { background: #F59E0B; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15); }
@@ -1210,6 +1260,22 @@ onMounted(() => {
   border-radius: var(--radius-xs);
   font-weight: 500;
 }
+.job-source {
+  font-size: 0.82rem;
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary-soft);
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+}
+.job-freshness {
+  display: flex;
+  gap: 14px;
+  margin: -4px 0 14px;
+  font-size: 0.86rem;
+  color: var(--color-text-faint);
+}
+.job-freshness a { color: var(--color-primary); text-decoration: none; }
+.job-freshness a:hover { text-decoration: underline; }
 .job-top-right { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex-shrink: 0; }
 .job-salary { font-size: 1.3rem; font-weight: 800; color: #EF4444; }
 
