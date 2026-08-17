@@ -339,9 +339,6 @@ export function downloadResumePdf(resumeId) {
 }
 
 /**
- * 健康检查 —— 启动时判断后端是否在线
- */
-/**
  * 职位搜索
  */
 export async function jobSearch(payload) {
@@ -422,13 +419,4 @@ export async function updateAdminUser(userId, payload) {
 export async function deleteAdminUser(userId) {
   const { data } = await http.delete(`/api/admin/users/${userId}`)
   return data
-}
-
-export async function checkHealth() {
-  try {
-    const { data } = await http.get('/api/health', { timeout: 3000 })
-    return data
-  } catch {
-    return null
-  }
 }

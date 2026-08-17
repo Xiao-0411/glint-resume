@@ -1,4 +1,4 @@
-"""被动捕获招聘平台前端自身发出的搜索接口响应。
+"""搜索接口响应的判定与字段映射。
 
 思路来自 boss-zhipin-scraper skill：BOSS直聘等平台对列表页薪资做了字体反爬，
 从 DOM 里读到的薪资是乱码字形；但页面自己调用的 JSON 接口返回的是明文
@@ -6,23 +6,18 @@
 而是让已登录的浏览器正常访问搜索页，再从 network 事件里把它自己发出的
 响应体捞出来解析。
 
-因此本模块只做两件事：
-1. 监听 page 的 response 事件，缓存目标接口的 JSON 响应；
-2. 把各平台的原始字段映射成项目统一的 job 结构。
+抓取与 CDP 交互在 cdp_collector.py；本模块只做纯逻辑，不依赖浏览器：
+1. classify() 把一次响应判定成 可用/空/未登录/风控/异常；
+2. 各平台 mapper 把原始字段映射成项目统一的 job 结构。
 
 登录态始终留在本机浏览器 profile 里，这里不读取也不上传任何 Cookie。
 """
-import asyncio
-import itertools
-import json
 import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
-
-from playwright.async_api import Page, Response
 
 logger = logging.getLogger("glint.crawler.capture")
 
@@ -68,6 +63,16 @@ SEARCH_URLS = {
 # 全国。需要限定城市时传 101010100(北京) / 101020100(上海) 等 9 位编码
 CITY_NATIONWIDE = "100010000"
 
+# 全量抓取覆盖的岗位方向
+JOB_KEYWORDS = [
+    "产品经理", "Java开发", "前端开发", "后端开发", "数据分析",
+    "测试工程师", "运营", "Python开发", "C++开发", "算法工程师",
+    "UI设计", "iOS开发", "Android开发", "运维工程师", "架构师",
+    "项目经理", "人力资源", "财务", "市场营销", "销售",
+    "人工智能", "大数据", "网络安全", "嵌入式", "游戏策划",
+    "产品运营", "新媒体运营", "电商运营", "技术支持", "实习生",
+]
+
 # BOSS 已知风控码。码表会随平台策略变化，所以再按 message 关键字兜底，
 # 避免新风控码被当成普通错误、进而误报成「未登录」。
 RESTRICTED_CODES = {31, 37}
@@ -110,80 +115,6 @@ class ProbeResult:
         if self.code is not None:
             detail = f"code={self.code} {detail}".strip()
         return f"{label}（{detail}）" if detail else label
-
-
-class ResponseCapture:
-    """挂在 Page 上，持续把目标接口的 JSON 响应推进队列。
-
-    handler 是 fire-and-forget 的异步任务，读 body 需要一次驱动往返，
-    所以 drain() 之前触发的响应可能在 drain() 之后才入队。用 epoch 计数区分：
-    每次 drain() 递增 epoch，wait_next 只接受当前 epoch 的响应，
-    避免上一个关键词的结果被当成本次导航的结果。
-    """
-
-    def __init__(self, page: Page, platform: str):
-        self.page = page
-        self.platform = platform
-        self.path = API_PATHS[platform]
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._handler: Optional[Callable] = None
-        self._epoch_counter = itertools.count()
-        self._epoch = next(self._epoch_counter)
-
-    def attach(self) -> None:
-        async def on_response(response: Response) -> None:
-            if not matches_api_path(self.platform, response.url):
-                return
-            epoch = self._epoch  # 记录响应发生时所属的轮次
-            try:
-                # 必须在这里立刻读 body：导航之后响应体可能已被释放
-                body = await response.body()
-            except Exception as exc:  # 页面跳转/连接关闭都可能触发
-                logger.debug("capture_body_failed", extra={"platform": self.platform, "error": str(exc)})
-                return
-            try:
-                data = json.loads(body.decode("utf-8", errors="replace"))
-            except (json.JSONDecodeError, ValueError):
-                logger.debug("capture_not_json", extra={"platform": self.platform, "url": response.url[:200]})
-                return
-            await self._queue.put((epoch, response.status, data))
-
-        self._handler = on_response
-        self.page.on("response", on_response)
-
-    def detach(self) -> None:
-        if self._handler is not None:
-            try:
-                self.page.remove_listener("response", self._handler)
-            except Exception:
-                pass
-            self._handler = None
-
-    def drain(self) -> None:
-        """开启新一轮：丢弃已入队的旧响应，并让在途的旧响应失效。"""
-        self._epoch = next(self._epoch_counter)
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-
-    async def wait_next(self, timeout: float = 25.0) -> Optional[tuple]:
-        """等待本轮的下一个目标接口响应，超时返回 None。"""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return None
-            try:
-                epoch, status, data = await asyncio.wait_for(self._queue.get(), timeout=remaining)
-            except asyncio.TimeoutError:
-                return None
-            if epoch != self._epoch:
-                # 上一轮遗留的在途响应，丢弃后继续等
-                continue
-            return status, data
 
 
 # ============================================================

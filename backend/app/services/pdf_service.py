@@ -5,10 +5,7 @@ PDF 导出服务 —— 使用 WeasyPrint 将简历 JSON 渲染为 A4 PDF
 Windows 需额外安装 GTK3: https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#windows
 Linux: apt install weasyprint 或 pip install weasyprint
 """
-import base64
 import logging
-import os
-from typing import Optional
 
 logger = logging.getLogger("glint.pdf")
 

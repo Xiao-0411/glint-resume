@@ -32,7 +32,8 @@ Thumbs.db
 # ===== 工具目录 =====
 .claude/
 .claude/worktrees/
-.crawler_chrome_profile/
 # 爬虫运行产物：浏览器 profile 与 vendor 脚本的中间结果，不入库
 backend/.crawler_*/
 backend/vendor/boss_zhipin_scraper/.out/
+# 安全审计脚本的本地输出
+security_audit_report.txt

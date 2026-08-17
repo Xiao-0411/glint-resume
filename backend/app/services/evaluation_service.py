@@ -17,7 +17,6 @@ from app.services.scoring_rules import (
     QUANT_WITH_UNIT,
     VERB_STRONG,
     VERB_NEUTRAL,
-    VAGUE_WORDS,
     collect_bullets,
     score_bullet_credibility,
     score_bullet_professional,
@@ -400,22 +399,6 @@ def _highlight_title(name: str) -> str:
         "匹配度": "岗位匹配精准",
         "可信度": "内容真实可信"
     }.get(name, name)
-
-
-def _find_weakest_bullet(resume: Dict, predicate) -> Dict:
-    """
-    在 resume.experiences 中找出第一个匹配 predicate 的 bullet,
-    返回 {exp_id, exp_title, bullet} 或空 dict
-    """
-    for exp in resume.get("experiences", []):
-        for b in exp.get("bullets", []):
-            if predicate(b):
-                return {
-                    "exp_id": exp.get("id", ""),
-                    "exp_title": exp.get("title", ""),
-                    "bullet": b
-                }
-    return {}
 
 
 def _worst_bullet_by(resume: Dict, scorer) -> Dict:

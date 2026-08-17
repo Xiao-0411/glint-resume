@@ -3,10 +3,10 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
-.crawler_browser_profile/
-.crawler_chrome_profile/
-.crawler_chrome_profile_connected/
 venv/
 .idea/
 .vscode/
 uploads/
+# 爬虫运行产物：采集浏览器 profile 与 vendor 脚本中间结果
+.crawler_*/
+vendor/boss_zhipin_scraper/.out/

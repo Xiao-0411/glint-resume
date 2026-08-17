@@ -22,7 +22,7 @@ import os
 import random
 import sys
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from app.crawlers.api_capture import (
     CITY_NATIONWIDE,

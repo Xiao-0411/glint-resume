@@ -36,7 +36,6 @@ export const useChatStore = defineStore('chat', () => {
   const reEvaluating = ref(false)       // 正在重新评定中
 
   // ---- Getters ----
-  const messageCount = computed(() => messages.value.length)
   const userMessageCount = computed(
     () => messages.value.filter(m => m.role === 'user').length
   )
@@ -111,10 +110,6 @@ export const useChatStore = defineStore('chat', () => {
     resumeDirty.value = true
   }
 
-  function setResumeDirty(val) {
-    resumeDirty.value = !!val
-  }
-
   function setReEvaluating(val) {
     reEvaluating.value = !!val
   }
@@ -185,7 +180,6 @@ export const useChatStore = defineStore('chat', () => {
     resumeDirty,
     reEvaluating,
     // getters
-    messageCount,
     userMessageCount,
     // actions
     setTargetJob,
@@ -197,7 +191,6 @@ export const useChatStore = defineStore('chat', () => {
     setExtracted,
     setResume,
     updateExperience,
-    setResumeDirty,
     setReEvaluating,
     applyNewQualityReport,
     reset,

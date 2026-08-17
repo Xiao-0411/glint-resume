@@ -46,7 +46,6 @@ class Settings:
     # 预检直接 400,前端只能看到 axios 的 "Network Error"。开启后按正则放行任意
     # 本地端口,不必每次改 .env。仅在 APP_ENV=development 时生效。
     CORS_ALLOW_LOCAL_ANY_PORT: bool = os.getenv("CORS_ALLOW_LOCAL_ANY_PORT", "true").lower() == "true"
-    PORT: int = int(os.getenv("PORT", "8000"))
 
     # Auth
     AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "")

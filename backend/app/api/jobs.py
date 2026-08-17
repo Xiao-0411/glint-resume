@@ -9,7 +9,6 @@ POST /api/jobs/applications/status  ——  更新投递状态（持久化）
 """
 import datetime
 import uuid
-import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_
@@ -25,7 +24,6 @@ from app.mock.fallback import (
     mock_adapt_resume, mock_apply_job,
     KW_MAP,
 )
-from app.crawlers.scheduler import crawl_keyword
 
 router = APIRouter()
 
@@ -174,32 +172,9 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
         matched.sort(key=lambda x: x["matchScore"], reverse=True)
         return {"jobs": matched, "total": len(matched), "source": "db"}
 
-    if keyword:
-        try:
-            await asyncio.wait_for(crawl_keyword(keyword), timeout=35)
-        except asyncio.TimeoutError:
-            return {"jobs": [], "total": 0, "source": "live_unavailable", "message": "实时职位抓取超时，请稍后重试"}
-        except Exception:
-            return {"jobs": [], "total": 0, "source": "live_unavailable", "message": "实时职位暂时不可用，请稍后重试"}
-
-        # 抓取器使用独立 DB 会话写入；结束本请求旧的读事务，避免 MySQL
-        # REPEATABLE READ 快照看不到刚提交的职位。
-        db.rollback()
-        db_jobs = _db_job_search(keyword=keyword, db=db)
-        if db_jobs:
-            matched = []
-            for job in db_jobs:
-                m = _calc_match(req.target_job or keyword, job)
-                matched.append({
-                    **job,
-                    "matchScore": m["score"],
-                    "matchLevel": m["level"],
-                    "reasons": m["reasons"],
-                    "missingSkills": m["missing"],
-                })
-            matched.sort(key=lambda x: x["matchScore"], reverse=True)
-            return {"jobs": matched, "total": len(matched), "source": "live"}
-
+    # 库里没有匹配职位时不做实时抓取：抓取依赖本机已登录的采集浏览器，
+    # 需要几分钟并受平台限流约束，放在请求里必然超时。职位由后台爬虫
+    # （run_crawler.py，每 2 小时一轮）持续入库。
     return {"jobs": [], "total": 0, "source": "empty", "message": "暂无匹配的真实职位，请更换关键词后重试"}
 
 

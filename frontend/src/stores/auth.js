@@ -257,11 +257,6 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  function clearHistory() {
-    resumeHistory.value = []
-    persistHistory()
-  }
-
   // ---- 初始化：恢复登录状态 + 历史 ----
   const savedUser = localStorage.getItem('auth_user')
   if (savedUser) {
@@ -305,10 +300,8 @@ export const useAuthStore = defineStore('auth', () => {
     uploadAvatar,
     changePassword,
     logout,
-    loadHistory,
     addResumeToHistory,
-    removeResumeFromHistory,
-    clearHistory
+    removeResumeFromHistory
   }
 })
 

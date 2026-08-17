@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session as DBSession
 
-from app.api.auth import PASSWORD_POLICY_MESSAGE, _validate_password_policy
+from app.api.auth import _validate_password_policy
 from app.core.auth_deps import get_current_user
 from app.core.database import get_db
 from app.core.security import hash_password, verify_password

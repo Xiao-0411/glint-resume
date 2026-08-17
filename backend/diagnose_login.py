@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app.crawlers.api_capture import ProbeStatus, build_search_url, classify
+from app.crawlers.api_capture import build_search_url, classify
 from app.crawlers.cdp_collector import (
     CAPTURE_TIMEOUT,
     CDP_PORT,

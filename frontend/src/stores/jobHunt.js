@@ -6,9 +6,8 @@ import { ref, computed } from 'vue'
  */
 export const useJobHuntStore = defineStore('jobHunt', () => {
   // ---- 职位搜索 ----
-  const searchKeyword = ref('')
-  const searchResults = ref([])       // 原始搜索结果
-  const matchedJobs = ref([])         // 匹配分级后的结果 { id, title, company, salary, location, matchLevel, matchScore, reasons, missingSkills, adapted }
+  // 搜索关键词由 DashboardView 本地持有；这里只存分级后的结果
+  const matchedJobs = ref([])         // { id, title, company, salary, location, matchLevel, matchScore, reasons, missingSkills, adapted }
   const searchLoading = ref(false)
 
   // ---- 投递记录 ----
@@ -28,10 +27,6 @@ export const useJobHuntStore = defineStore('jobHunt', () => {
   const adaptedResumes = ref({})      // jobId -> { originalScore, adaptedScore, html }
 
   // ---- Getters ----
-  const greenJobs = computed(() => matchedJobs.value.filter(j => j.matchLevel === 'green'))
-  const yellowJobs = computed(() => matchedJobs.value.filter(j => j.matchLevel === 'yellow'))
-  const redJobs = computed(() => matchedJobs.value.filter(j => j.matchLevel === 'red'))
-
   const conversionRates = computed(() => {
     const t = stats.value.total
     if (t === 0) return { screened: 0, interview: 0, offer: 0 }
@@ -43,10 +38,6 @@ export const useJobHuntStore = defineStore('jobHunt', () => {
   })
 
   // ---- Actions ----
-  function setSearchResults(jobs) {
-    searchResults.value = jobs
-  }
-
   function setMatchedJobs(jobs) {
     matchedJobs.value = jobs
   }
@@ -91,8 +82,6 @@ export const useJobHuntStore = defineStore('jobHunt', () => {
   }
 
   function reset() {
-    searchKeyword.value = ''
-    searchResults.value = []
     matchedJobs.value = []
     searchLoading.value = false
     applications.value = []
@@ -102,10 +91,10 @@ export const useJobHuntStore = defineStore('jobHunt', () => {
   }
 
   return {
-    searchKeyword, searchResults, matchedJobs, searchLoading,
+    matchedJobs, searchLoading,
     applications, stats, adaptingJobId, adaptedResumes,
-    greenJobs, yellowJobs, redJobs, conversionRates,
-    setSearchResults, setMatchedJobs, setSearchLoading,
+    conversionRates,
+    setMatchedJobs, setSearchLoading,
     addApplication, updateApplicationStatus, recalcStats,
     setAdaptingJobId, saveAdaptedResume, reset
   }

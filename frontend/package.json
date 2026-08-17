@@ -14,8 +14,6 @@
     "naive-ui": "^2.38.0",
     "pdfjs-dist": "^4.0.379",
     "pinia": "^2.1.7",
-    "postprocessing": "^6.39.2",
-    "three": "^0.185.1",
     "vue": "^3.4.0",
     "vue-echarts": "^6.7.0",
     "vue-router": "^4.3.0"

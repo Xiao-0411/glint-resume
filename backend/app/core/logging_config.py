@@ -61,9 +61,3 @@ def setup_logging(level: str = "INFO") -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-
-
-def get_logger(name: str) -> GlintLogger:
-    """获取带结构化支持的 logger"""
-    raw_logger = logging.getLogger(name)
-    return GlintLogger(raw_logger, {})

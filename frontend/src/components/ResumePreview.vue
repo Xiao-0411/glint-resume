@@ -112,7 +112,6 @@
               <li v-for="(b, j) in exp.bullets" :key="j">{{ b }}</li>
             </ul>
             <span v-if="exp.tag" class="exp-tag" :class="`tag-${exp.tag.color}`">
-              <span class="tag-dot"></span>
               {{ tagIcon(exp.tag.color) }} {{ exp.tag.label }}
             </span>
           </div>
@@ -553,8 +552,6 @@ function onExpClick(exp) {
   color: #B45309;
   border: 1px solid rgba(245, 158, 11, 0.30);
 }
-
-.tag-dot { display: none; }
 
 /* ============ 技能 ============ */
 .skill-grid {

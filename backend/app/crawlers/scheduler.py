@@ -1,6 +1,7 @@
-"""
-职位爬虫调度器 —— 每 2 小时自动运行一次
-可作为独立脚本运行，也可集成到 FastAPI 启动时
+"""职位爬虫调度器 —— 每 2 小时自动运行一次。
+
+三个平台统一走 cdp_collector 的原生 CDP 引擎，可作为独立脚本运行
+（run_crawler.py），也可由一键启动脚本拉起。
 """
 import asyncio
 import datetime
@@ -14,10 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.database import SessionLocal, init_db
 from app.models.db_models import Job, CrawlerStatus
-from app.crawlers.base import JOB_KEYWORDS
-from app.crawlers.zhipin import ZhipinCrawler
-from app.crawlers.zhaopin import ZhaopinCrawler
-from app.crawlers.liepin import LiepinCrawler
+from app.crawlers.api_capture import JOB_KEYWORDS
 from app.crawlers.cdp_collector import PLATFORM_LABELS, UnifiedCDPCollector
 
 logger = logging.getLogger("glint.scheduler")
@@ -155,114 +153,6 @@ async def _expire_and_cleanup_async() -> dict:
     return await asyncio.to_thread(_expire_and_cleanup)
 
 
-async def _crawl_all() -> dict:
-    results = {}
-    crawlers = [
-        ("zhipin", ZhipinCrawler()),
-        ("zhaopin", ZhaopinCrawler()),
-        ("liepin", LiepinCrawler()),
-    ]
-
-    for name, crawler in crawlers:
-        started = datetime.datetime.now(datetime.timezone.utc)
-        started_monotonic = time.monotonic()
-        _update_status(name, status="running", last_started_at=started, last_error="")
-        try:
-            logger.info("crawler_start", extra={"platform": name})
-            jobs = await crawler.crawl()
-            results[name] = len(jobs)
-            saved = _save_jobs(jobs)
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            status_fields = {
-                "status": "success" if jobs else "empty",
-                "last_finished_at": finished,
-                "last_job_count": len(jobs),
-                "last_saved_count": saved,
-                "last_duration_ms": round((time.monotonic() - started_monotonic) * 1000),
-                "last_error": "" if jobs else "平台返回 0 条职位",
-            }
-            if jobs:
-                status_fields["last_success_at"] = finished
-            _update_status(name, **status_fields)
-            logger.info("crawler_done", extra={"platform": name, "count": len(jobs)})
-        except Exception as exc:
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            _update_status(
-                name,
-                status="failed",
-                last_finished_at=finished,
-                last_job_count=0,
-                last_saved_count=0,
-                last_duration_ms=round((time.monotonic() - started_monotonic) * 1000),
-                last_error=str(exc)[:1000],
-            )
-            logger.error("crawler_failed", extra={"platform": name, "error": str(exc)})
-            results[name] = 0
-        finally:
-            await crawler.close()
-
-    return results
-
-
-async def crawl_keyword(keyword: str) -> dict:
-    """按用户当前搜索词抓取一次，供职位搜索接口在库为空时使用。"""
-    keyword = (keyword or "").strip()
-    if not keyword:
-        return {"zhipin": 0, "zhaopin": 0, "liepin": 0}
-
-    results = {}
-    crawlers = [
-        ("zhipin", ZhipinCrawler()),
-        ("zhaopin", ZhaopinCrawler()),
-        ("liepin", LiepinCrawler()),
-    ]
-    for name, crawler in crawlers:
-        started = datetime.datetime.now(datetime.timezone.utc)
-        started_monotonic = time.monotonic()
-        await _update_status_async(name, status="running", last_started_at=started, last_error="")
-        try:
-            jobs = await crawler.crawl(keywords=[keyword])
-            results[name] = len(jobs)
-            saved = await _save_jobs_async(jobs)
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            status_fields = {
-                "status": "success" if jobs else "empty", "last_finished_at": finished,
-                "last_job_count": len(jobs), "last_saved_count": saved,
-                "last_duration_ms": round((time.monotonic() - started_monotonic) * 1000),
-                "last_error": "" if jobs else "平台返回 0 条职位",
-            }
-            if jobs:
-                status_fields["last_success_at"] = finished
-            await _update_status_async(name, **status_fields)
-        except Exception as exc:
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            await _update_status_async(
-                name, status="failed", last_finished_at=finished, last_job_count=0,
-                last_saved_count=0, last_duration_ms=round((time.monotonic() - started_monotonic) * 1000),
-                last_error=str(exc)[:1000],
-            )
-            logger.warning("crawler_keyword_failed", extra={"platform": name, "keyword": keyword, "error": str(exc)})
-            results[name] = 0
-        finally:
-            await crawler.close()
-    return results
-
-
-async def _run_once():
-    """执行一次全量抓取"""
-    logger.info("crawl_cycle_start")
-    start = time.time()
-    results = await _crawl_all()
-    cleanup = _expire_and_cleanup()
-    elapsed = time.time() - start
-    total = sum(results.values())
-    logger.info(
-        "crawl_cycle_done",
-        extra={"results": results, "total": total, "cleanup": cleanup, "elapsed_seconds": round(elapsed, 1)},
-    )
-    return results
-
-
 async def _persist_platform(platform: str, jobs: list, error: str, is_blocked: bool,
                             started_monotonic: float) -> dict:
     """写入职位并更新该平台的抓取状态。"""
@@ -345,14 +235,3 @@ async def run_scheduler():
             await asyncio.sleep(CRAWL_INTERVAL_SECONDS)
     finally:
         await collector.close()
-
-
-if __name__ == "__main__":
-    import sys
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-    from app.core.logging_config import setup_logging
-    setup_logging(level="INFO")
-
-    asyncio.run(run_scheduler())

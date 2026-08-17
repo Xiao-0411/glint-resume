@@ -98,14 +98,6 @@ class ChatRequest(BaseModel):
     user_msg_count: int = Field(..., description="用户消息总数(含本条)")
 
 
-class ChatResponseMeta(BaseModel):
-    """非流式或流式末尾返回的元信息"""
-    stage: str = Field(..., description="下一轮阶段")
-    stage_label: str = Field("", description="阶段中文标签")
-    quick_replies: List[str] = Field(default_factory=list)
-    extracted_info: Optional[Dict[str, Any]] = None
-
-
 # ============ Resume ============
 
 class GenerateResumeRequest(BaseModel):
@@ -215,13 +207,6 @@ class QualityReport(BaseModel):
     integrity_statement: str = ""
     from_upload: bool = False
     source_file: Optional[str] = None
-
-
-# ============ Combined ============
-
-class ResumeWithReport(BaseModel):
-    resume: ResumeData
-    quality_report: QualityReport
 
 
 # ============ Jobs (求职加速) ============
