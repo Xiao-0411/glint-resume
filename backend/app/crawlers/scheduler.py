@@ -19,6 +19,7 @@ from app.crawlers.zhipin import ZhipinCrawler
 from app.crawlers.zhaopin import ZhaopinCrawler
 from app.crawlers.liepin import LiepinCrawler
 from app.crawlers.browser_session import BrowserSessionCollector
+from app.crawlers.boss_scraper import BossScraperCollector
 
 logger = logging.getLogger("glint.scheduler")
 
@@ -263,51 +264,107 @@ async def _run_once():
     return results
 
 
+async def _persist_platform(platform: str, jobs: list, error: str, is_blocked: bool,
+                            started_monotonic: float) -> dict:
+    """写入职位并更新该平台的抓取状态。"""
+    saved = await _save_jobs_async(jobs)
+    finished = datetime.datetime.now(datetime.timezone.utc)
+    if is_blocked:
+        status = "blocked"
+    elif error:
+        status = "failed"
+    elif jobs:
+        status = "success"
+    else:
+        status = "empty"
+    status_fields = {
+        "status": status,
+        "last_finished_at": finished,
+        "last_job_count": len(jobs), "last_saved_count": saved,
+        "last_duration_ms": round((time.monotonic() - started_monotonic) * 1000),
+        "last_error": error or ("接口返回 0 条职位" if not jobs else ""),
+    }
+    if jobs and not error:
+        status_fields["last_success_at"] = finished
+    await _update_status_async(platform, **status_fields)
+    return {"fetched": len(jobs), "saved": saved}
+
+
+async def _collect_boss(boss: BossScraperCollector, started: float) -> dict:
+    """BOSS 走 vendor 的原生 CDP 脚本，与其它平台完全独立，失败不影响它们。"""
+    try:
+        jobs = await boss.crawl(JOB_KEYWORDS)
+    except Exception as exc:
+        logger.error("boss_collect_failed", extra={"error": str(exc)})
+        return await _persist_platform("zhipin", [], str(exc)[:1000], False, started)
+    return await _persist_platform(
+        "zhipin", jobs,
+        boss.errors.get("zhipin", ""), boss.blocked.get("zhipin", False),
+        started,
+    )
+
+
 async def run_scheduler():
     """启动定时调度器：每 2 小时执行一次"""
     init_db()
     browser_collector = BrowserSessionCollector()
+    boss_collector = BossScraperCollector()
+    boss_ready = False
     try:
         await browser_collector.start_and_wait_for_login()
+        # BOSS 用独立浏览器；它没就绪不该拖垮智联/猎聘
+        try:
+            await boss_collector.start_and_wait_for_login()
+            boss_ready = True
+        except Exception as exc:
+            logger.error("boss_setup_failed", extra={"error": str(exc)})
+            print(f"BOSS 采集不可用：{exc}", flush=True)
+            await _update_status_async(
+                "zhipin", status="blocked",
+                last_started_at=datetime.datetime.now(datetime.timezone.utc),
+                last_error=str(exc)[:1000],
+            )
         logger.info("scheduler_started", extra={"interval_hours": CRAWL_INTERVAL_SECONDS / 3600})
 
         while True:
             cycle_started = time.monotonic()
             try:
-                # 浏览器以正常用户方式打开搜索页，被动捕获页面自身的接口响应。
                 results = {}
-                for platform in browser_collector.pages:
+                running_platforms = list(browser_collector.pages)
+                if boss_ready:
+                    running_platforms.append("zhipin")
+                for platform in running_platforms:
                     await _update_status_async(
                         platform,
                         status="running",
                         last_started_at=datetime.datetime.now(datetime.timezone.utc),
                         last_error="",
                     )
-                captured = await browser_collector.crawl_all(JOB_KEYWORDS)
-                for platform, jobs in captured.items():
-                    saved = await _save_jobs_async(jobs)
-                    results[platform] = {"fetched": len(jobs), "saved": saved}
-                    finished = datetime.datetime.now(datetime.timezone.utc)
-                    error = browser_collector.errors.get(platform, "")
-                    is_blocked = browser_collector.blocked.get(platform, False)
-                    if is_blocked:
-                        status = "blocked"
-                    elif error:
-                        status = "failed"
-                    elif jobs:
-                        status = "success"
+
+                # 两条采集路径并行：Playwright 管智联/猎聘，vendor 脚本管 BOSS
+                tasks = [browser_collector.crawl_all(JOB_KEYWORDS)]
+                if boss_ready:
+                    tasks.append(_collect_boss(boss_collector, cycle_started))
+                gathered = await asyncio.gather(*tasks, return_exceptions=True)
+
+                captured = gathered[0]
+                if isinstance(captured, BaseException):
+                    logger.error("browser_crawl_failed", extra={"error": str(captured)})
+                else:
+                    for platform, jobs in captured.items():
+                        results[platform] = await _persist_platform(
+                            platform, jobs,
+                            browser_collector.errors.get(platform, ""),
+                            browser_collector.blocked.get(platform, False),
+                            cycle_started,
+                        )
+                if boss_ready:
+                    boss_result = gathered[1]
+                    if isinstance(boss_result, BaseException):
+                        logger.error("boss_crawl_failed", extra={"error": str(boss_result)})
                     else:
-                        status = "empty"
-                    status_fields = {
-                        "status": status,
-                        "last_finished_at": finished,
-                        "last_job_count": len(jobs), "last_saved_count": saved,
-                        "last_duration_ms": round((time.monotonic() - cycle_started) * 1000),
-                        "last_error": error or ("接口返回 0 条职位" if not jobs else ""),
-                    }
-                    if jobs and not error:
-                        status_fields["last_success_at"] = finished
-                    await _update_status_async(platform, **status_fields)
+                        results["zhipin"] = boss_result
+
                 cleanup = await _expire_and_cleanup_async()
                 logger.info(
                     "browser_crawl_cycle_done",

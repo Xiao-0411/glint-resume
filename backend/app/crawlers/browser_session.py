@@ -33,6 +33,13 @@ PLATFORMS = {
     "liepin": "猎聘",
 }
 
+# BOSS 交给 vendor 的原生 CDP 脚本（见 boss_scraper.py 顶部说明）；
+# Playwright 连上 BOSS 会被风控踢回登录页，这里默认不再接管它。
+PLAYWRIGHT_PLATFORMS = tuple(
+    p for p in PLATFORMS
+    if p != "zhipin" or os.getenv("CRAWLER_ZHIPIN_VIA_PLAYWRIGHT", "").lower() in ("1", "true", "yes")
+)
+
 # 平台首页，用于建立会话和判断登录态
 HOME_URLS = {
     "zhipin": "https://www.zhipin.com/web/geek/job?query=%E4%BA%A7%E5%93%81%E7%BB%8F%E7%90%86",
@@ -123,7 +130,7 @@ class BrowserSessionCollector:
             )
 
         existing = list(self.context.pages)
-        for platform in PLATFORMS:
+        for platform in PLAYWRIGHT_PLATFORMS:
             page = next((p for p in existing if HOSTS[platform] in p.url), None)
             if page is None:
                 page = await self.context.new_page()
