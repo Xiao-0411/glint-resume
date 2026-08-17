@@ -26,12 +26,37 @@ from playwright.async_api import Page, Response
 
 logger = logging.getLogger("glint.crawler.capture")
 
-# 各平台搜索接口路径特征（子串匹配即可，平台常带不同 query 前缀）
-API_PATHS = {
-    "zhipin": "/wapi/zpgeek/search/joblist.json",
-    "zhaopin": "/c/i/sou",
-    "liepin": "searchfront4c.pc-search-job",
+# 各平台搜索接口路径特征（子串匹配即可，平台常带不同 query 前缀）。
+# 每个平台给多个候选：平台改接口路径时不至于直接失效，命中任一个即可。
+# 只有 zhipin 那条是从 boss-zhipin-scraper 确认过的；另两条来自项目原有代码，
+# 若某平台一直「未捕获到响应」，用 F12 Network 看真实路径后补进对应列表。
+API_PATH_CANDIDATES = {
+    "zhipin": (
+        "/wapi/zpgeek/search/joblist.json",
+        "/wapi/zpgeek/pc/recommend/job/list.json",
+        "/wapi/zpgeek/search/joblist",
+    ),
+    "zhaopin": (
+        "/c/i/search/positions",
+        "/c/i/sou",
+        "/search/positions",
+        "fe-api.zhaopin.com/c/i/",
+    ),
+    "liepin": (
+        "searchfront4c.pc-search-job",
+        "/api/com.liepin.searchfront4c.pc-search-job",
+        "com.liepin.searchfront4c",
+        "/api/com.liepin.searchfront4c",
+    ),
 }
+
+# 兼容旧引用：取每个平台的首选路径
+API_PATHS = {p: c[0] for p, c in API_PATH_CANDIDATES.items()}
+
+
+def matches_api_path(platform: str, url: str) -> bool:
+    """URL 是否命中该平台的搜索接口（任一候选路径即可）。"""
+    return any(path in url for path in API_PATH_CANDIDATES.get(platform, ()))
 
 # 搜索页 URL 模板。zhipin 用 /web/geek/job（支持 page 翻页参数）
 SEARCH_URLS = {
@@ -107,7 +132,7 @@ class ResponseCapture:
 
     def attach(self) -> None:
         async def on_response(response: Response) -> None:
-            if self.path not in response.url:
+            if not matches_api_path(self.platform, response.url):
                 return
             epoch = self._epoch  # 记录响应发生时所属的轮次
             try:

@@ -1,14 +1,11 @@
-"""掉登录问题诊断：不抓数据，只检查连上 CDP 之后 BOSS 会话还在不在。
+"""采集环境诊断：不抓数据入库，只检查三个平台能不能拿到接口数据。
 
-用法（先跑 启动登录浏览器.bat 起好 Chrome，登录 BOSS，然后）：
-
+用法：
     cd backend
     .venv\\Scripts\\python.exe diagnose_login.py
 
-脚本会分三步定位「一启动就掉登录」到底发生在哪个环节：
-  1) 只连 CDP，不导航    —— 看连接本身会不会踢掉会话
-  2) 装可见性伪装后导航  —— 看当前修复是否生效
-  3) 读接口响应判定风控  —— 区分「掉登录」和「被风控」
+会自动拉起采集专用 Chrome（和爬虫用的是同一个），逐个平台报告：
+登录态、是否被风控、能不能解析出职位、薪资是否为明文。
 """
 import asyncio
 import os
@@ -16,113 +13,133 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from playwright.async_api import async_playwright
+from app.crawlers.api_capture import ProbeStatus, build_search_url, classify
+from app.crawlers.cdp_collector import (
+    CAPTURE_TIMEOUT,
+    CDP_PORT,
+    PLATFORM_LABELS,
+    UnifiedCDPCollector,
+)
 
-from app.crawlers.api_capture import ResponseCapture, build_search_url, classify
-from app.crawlers.browser_session import BACKGROUND_VISIBILITY_SCRIPT
-
-CDP_URL = os.getenv("CRAWLER_CDP_URL", "http://127.0.0.1:9222")
 PROBE_JS = """(() => {
   let stackRead = false;
   const e = new Error();
   Object.defineProperty(e, 'stack', {get(){ stackRead = true; return ''; }});
   console.debug(e);
-  return {
+  return JSON.stringify({
     webdriver: navigator.webdriver,
     hidden: document.hidden,
     visibility: document.visibilityState,
     hasFocus: document.hasFocus(),
     runtimeEnableDetected: stackRead,
-    url: location.href,
-  };
+    url: location.href
+  });
 })()"""
 
 
-def line(title):
-    print("\n" + "=" * 58)
+def header(title):
+    print("\n" + "=" * 60)
     print(title)
-    print("=" * 58)
+    print("=" * 60)
 
 
 async def main():
-    pw = await async_playwright().start()
-    line("1. 连接 CDP（不导航，只看会话是否存活）")
+    header(f"1. 准备采集专用 Chrome（CDP 端口 {CDP_PORT}）")
+    collector = UnifiedCDPCollector()
     try:
-        browser = await pw.chromium.connect_over_cdp(CDP_URL, no_defaults=True)
+        # 只开标签页、不等人工登录，登录态由下面逐平台报告
+        await asyncio.to_thread(_open_only, collector)
     except Exception as exc:
-        print(f"连不上 {CDP_URL}: {exc}")
-        print("请先运行 启动登录浏览器.bat")
-        await pw.stop()
+        print(f"启动失败: {exc}")
         return 1
 
-    ctx = browser.contexts[0]
-    print(f"已连接，现有标签页 {len(ctx.pages)} 个")
+    print(f"已打开 {len(collector.tabs)} 个采集标签页")
 
-    cookies = await ctx.cookies("https://www.zhipin.com")
-    names = {c["name"] for c in cookies}
-    print(f"zhipin cookie 数: {len(cookies)}")
-    for key in ("zp_at", "__zp_stoken__", "wt2", "bst"):
-        print(f"  {key:16} {'有' if key in names else '缺失'}")
-    if "zp_at" not in names:
-        print("  -> 连接前就没有登录 token，问题在浏览器登录态本身，不是爬虫")
+    header("2. 浏览器指纹自检（应全部为「正常」）")
+    tab = next(iter(collector.tabs.values()))
+    import json as _json
 
-    line("2. 打开搜索页（已注入可见性伪装）")
-    page = next((p for p in ctx.pages if "zhipin.com" in p.url), None) or await ctx.new_page()
-    await page.add_init_script(BACKGROUND_VISIBILITY_SCRIPT)
+    raw = await asyncio.to_thread(tab.cdp.eval_js, PROBE_JS, tab.session_id)
     try:
-        session = await ctx.new_cdp_session(page)
-        await session.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-        await session.detach()
-        print("焦点仿真已开启")
-    except Exception as exc:
-        print(f"焦点仿真失败（有 JS 兜底，可忽略）: {exc}")
+        probe = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (ValueError, TypeError):
+        probe = {}
+    checks = [
+        ("navigator.webdriver", probe.get("webdriver"), False, "true 会被直接识别为自动化"),
+        ("document.hidden", probe.get("hidden"), False, "true 会触发可见性反爬"),
+        ("visibilityState", probe.get("visibility"), "visible", "hidden 会被判定为后台机器人"),
+        ("document.hasFocus()", probe.get("hasFocus"), True, "false 说明焦点仿真没生效"),
+        ("Runtime.enable 可探测", probe.get("runtimeEnableDetected"), False, "true 说明暴露了 CDP"),
+    ]
+    for name, got, want, why in checks:
+        mark = "正常" if got == want else "异常"
+        extra = "" if got == want else f"  <- {why}"
+        print(f"  [{mark}] {name:24} = {got!r}{extra}")
 
-    capture = ResponseCapture(page, "zhipin")
-    capture.attach()
-    capture.drain()
+    header("3. 逐平台探测")
+    any_ok = False
+    for platform, tab in collector.tabs.items():
+        label = PLATFORM_LABELS[platform]
+        print(f"\n--- {label} ---")
+        await asyncio.to_thread(tab.drain)
+        url = build_search_url(platform, "Java", 1, collector.city)
+        await asyncio.to_thread(tab.navigate, url)
+        await asyncio.sleep(3)
+        got = await asyncio.to_thread(tab.wait_response, CAPTURE_TIMEOUT)
+        if got is None:
+            await asyncio.to_thread(tab.human_scroll)
+            got = await asyncio.to_thread(tab.wait_response, CAPTURE_TIMEOUT)
 
-    url = build_search_url("zhipin", "Java开发", 1)
-    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    await asyncio.sleep(3)
+        cur = await asyncio.to_thread(tab.current_url)
+        print(f"  当前 URL : {cur[:82]}")
+        if any(m in cur.lower() for m in ("/web/user/", "login", "passport")):
+            print("  结论     : 被跳到登录页 —— 需要在专用 Chrome 里登录该平台")
+            continue
+        if got is None:
+            print("  结论     : 未捕获到搜索接口响应")
+            print("             接口路径可能变了。用 F12 Network 找真实路径，")
+            print("             补到 api_capture.py 的 API_PATH_CANDIDATES 里。")
+            continue
 
-    probe = await page.evaluate(PROBE_JS)
-    print(f"最终 URL          : {probe['url'][:88]}")
-    print(f"navigator.webdriver: {probe['webdriver']}   (true 就是明显特征)")
-    print(f"document.hidden    : {probe['hidden']}   (必须是 False)")
-    print(f"visibilityState    : {probe['visibility']}  (必须是 visible)")
-    print(f"document.hasFocus(): {probe['hasFocus']}")
-    print(f"Runtime.enable 可被探测: {probe['runtimeEnableDetected']}")
-
-    bounced = any(m in probe["url"].lower() for m in ("/web/user/", "login"))
-    print(f"\n是否被踢回登录页  : {'是 —— 掉登录复现了' if bounced else '否 —— 会话存活'}")
-
-    line("3. 读接口响应，区分掉登录 / 风控 / 正常")
-    got = await capture.wait_next(timeout=25)
-    if got is None:
-        print("没捕获到 joblist 接口响应。")
-        print("可能：页面结构变了、接口路径变了，或请求根本没发出（被拦在前面）。")
-    else:
         status, data = got
-        result = classify("zhipin", status, data)
-        print(f"HTTP {status} -> {result.status.value}")
-        print(f"判定: {result.describe()}")
-        print(f"解析到职位: {len(result.jobs)} 条")
+        result = classify(platform, status, data)
+        print(f"  HTTP     : {status} -> {result.status.value}")
+        print(f"  判定     : {result.describe()}")
+        print(f"  解析职位 : {len(result.jobs)} 条")
         if result.jobs:
             j = result.jobs[0]
-            print(f"样例: {j['title']} | {j['salary']} | {j['company']}")
-            print("薪资是明文说明接口通道正常。")
+            print(f"  样例     : {j['title']} | {j['salary']} | {j['company']}")
+            if j["salary"]:
+                print("  薪资明文 : 是（接口通道正常）")
+                any_ok = True
+            else:
+                print("  薪资明文 : 否 —— 可能未登录或接口未返回 salaryDesc")
 
-    capture.detach()
-    await pw.stop()
+    await collector.close()
 
-    line("结论")
-    if bounced:
-        print("确认掉登录。可见性伪装没能挡住，需要进一步排查：")
-        print("  - 换成只连单个标签页的原生 CDP（避开 Playwright 对所有标签页的 Runtime.enable）")
-        print("  - 检查是否挂了 VPN/代理：参考项目里有人就是关掉 Clash 后恢复正常的")
+    header("结论")
+    if any_ok:
+        print("至少一个平台可正常采集。直接运行 启动爬虫.bat 即可。")
     else:
-        print("会话存活，掉登录问题已缓解。可以正常启动爬虫。")
+        print("没有平台成功拿到数据。按顺序排查：")
+        print("  1) 在专用 Chrome 里登录对应平台（爬虫会自动等你登录）")
+        print("  2) 关掉 VPN/代理 —— 平台对代理出口 IP 有独立风控")
+        print("  3) 用 F12 Network 核对接口路径是否变更")
     return 0
+
+
+def _open_only(collector):
+    """只拉起 Chrome 和标签页，跳过等待人工登录那一步。"""
+    from app.crawlers.cdp_collector import PlatformTab, _load_vendor
+
+    collector.vendor = _load_vendor()
+    collector._ensure_chrome()
+    collector.cdp = collector.vendor.CDPSession(CDP_PORT)
+    for platform in PLATFORM_LABELS:
+        tab = PlatformTab(collector.vendor, collector.cdp, platform)
+        tab.open()
+        collector.tabs[platform] = tab
+    collector.platforms = list(collector.tabs)
 
 
 if __name__ == "__main__":

@@ -18,8 +18,7 @@ from app.crawlers.base import JOB_KEYWORDS
 from app.crawlers.zhipin import ZhipinCrawler
 from app.crawlers.zhaopin import ZhaopinCrawler
 from app.crawlers.liepin import LiepinCrawler
-from app.crawlers.browser_session import BrowserSessionCollector
-from app.crawlers.boss_scraper import BossScraperCollector
+from app.crawlers.cdp_collector import PLATFORM_LABELS, UnifiedCDPCollector
 
 logger = logging.getLogger("glint.scheduler")
 
@@ -290,50 +289,24 @@ async def _persist_platform(platform: str, jobs: list, error: str, is_blocked: b
     return {"fetched": len(jobs), "saved": saved}
 
 
-async def _collect_boss(boss: BossScraperCollector, started: float) -> dict:
-    """BOSS 走 vendor 的原生 CDP 脚本，与其它平台完全独立，失败不影响它们。"""
-    try:
-        jobs = await boss.crawl(JOB_KEYWORDS)
-    except Exception as exc:
-        logger.error("boss_collect_failed", extra={"error": str(exc)})
-        return await _persist_platform("zhipin", [], str(exc)[:1000], False, started)
-    return await _persist_platform(
-        "zhipin", jobs,
-        boss.errors.get("zhipin", ""), boss.blocked.get("zhipin", False),
-        started,
-    )
-
-
 async def run_scheduler():
-    """启动定时调度器：每 2 小时执行一次"""
+    """启动定时调度器：每 2 小时执行一次。
+
+    三个平台统一走 cdp_collector（vendor 的原生 CDP 引擎）：自动拉起专用
+    Chrome、自动等登录、之后全自动循环，不需要人工再做别的操作。
+    """
     init_db()
-    browser_collector = BrowserSessionCollector()
-    boss_collector = BossScraperCollector()
-    boss_ready = False
+    collector = UnifiedCDPCollector()
     try:
-        await browser_collector.start_and_wait_for_login()
-        # BOSS 用独立浏览器；它没就绪不该拖垮智联/猎聘
-        try:
-            await boss_collector.start_and_wait_for_login()
-            boss_ready = True
-        except Exception as exc:
-            logger.error("boss_setup_failed", extra={"error": str(exc)})
-            print(f"BOSS 采集不可用：{exc}", flush=True)
-            await _update_status_async(
-                "zhipin", status="blocked",
-                last_started_at=datetime.datetime.now(datetime.timezone.utc),
-                last_error=str(exc)[:1000],
-            )
+        await collector.start_and_wait_for_login()
         logger.info("scheduler_started", extra={"interval_hours": CRAWL_INTERVAL_SECONDS / 3600})
 
         while True:
             cycle_started = time.monotonic()
             try:
                 results = {}
-                running_platforms = list(browser_collector.pages)
-                if boss_ready:
-                    running_platforms.append("zhipin")
-                for platform in running_platforms:
+                active = [p for p in collector.platforms if not collector.blocked.get(p)]
+                for platform in active:
                     await _update_status_async(
                         platform,
                         status="running",
@@ -341,39 +314,29 @@ async def run_scheduler():
                         last_error="",
                     )
 
-                # 两条采集路径并行：Playwright 管智联/猎聘，vendor 脚本管 BOSS
-                tasks = [browser_collector.crawl_all(JOB_KEYWORDS)]
-                if boss_ready:
-                    tasks.append(_collect_boss(boss_collector, cycle_started))
-                gathered = await asyncio.gather(*tasks, return_exceptions=True)
-
-                captured = gathered[0]
-                if isinstance(captured, BaseException):
-                    logger.error("browser_crawl_failed", extra={"error": str(captured)})
-                else:
-                    for platform, jobs in captured.items():
-                        results[platform] = await _persist_platform(
-                            platform, jobs,
-                            browser_collector.errors.get(platform, ""),
-                            browser_collector.blocked.get(platform, False),
-                            cycle_started,
-                        )
-                if boss_ready:
-                    boss_result = gathered[1]
-                    if isinstance(boss_result, BaseException):
-                        logger.error("boss_crawl_failed", extra={"error": str(boss_result)})
-                    else:
-                        results["zhipin"] = boss_result
+                captured = await collector.crawl_all(JOB_KEYWORDS)
+                for platform, jobs in captured.items():
+                    results[platform] = await _persist_platform(
+                        platform, jobs,
+                        collector.errors.get(platform, ""),
+                        collector.blocked.get(platform, False),
+                        cycle_started,
+                    )
 
                 cleanup = await _expire_and_cleanup_async()
                 logger.info(
-                    "browser_crawl_cycle_done",
+                    "crawl_cycle_done",
                     extra={
                         "results": results,
                         "cleanup": cleanup,
                         "elapsed_seconds": round(time.monotonic() - cycle_started, 1),
                     },
                 )
+                total_saved = sum(r["saved"] for r in results.values())
+                summary = "，".join(
+                    f"{PLATFORM_LABELS.get(p, p)} {r['fetched']} 条" for p, r in results.items()
+                )
+                print(f"本轮完成：{summary}；入库 {total_saved} 条。", flush=True)
             except Exception as exc:
                 logger.exception("scheduler_cycle_error", extra={"error": str(exc)})
 
@@ -381,7 +344,7 @@ async def run_scheduler():
             logger.info("scheduler_next_run", extra={"next_at": next_run.isoformat()})
             await asyncio.sleep(CRAWL_INTERVAL_SECONDS)
     finally:
-        await browser_collector.close()
+        await collector.close()
 
 
 if __name__ == "__main__":

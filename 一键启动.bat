@@ -127,7 +127,8 @@ if !errorlevel! neq 0 (
 echo [OK] Frontend started
 
 echo [Extra] Starting Job Crawler (every 2 hours)...
-start "GlintCrawler - Login Required" cmd /k "cd /d "%BACKEND_DIR%" && "%VENV_PYTHON%" run_crawler.py"
+rem 爬虫会自己拉起采集专用 Chrome 并检测登录态；首次需在该窗口里登录一次。
+start "GlintCrawler" cmd /k "cd /d "%BACKEND_DIR%" && "%VENV_PYTHON%" run_crawler.py"
 echo [OK] Crawler started
 echo.
 

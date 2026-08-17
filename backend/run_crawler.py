@@ -1,7 +1,9 @@
 """
 职位爬虫 - 独立运行入口
 启动:  python run_crawler.py
-启动可见浏览器完成三个平台登录后，每 2 小时抓取职位数据并存入 MySQL
+
+三个平台（BOSS直聘/智联招聘/猎聘）统一走原生 CDP 引擎：自动拉起采集专用
+Chrome、自动检测登录态（首次需人工登录一次），之后每 2 小时自动抓取并入库。
 """
 import asyncio
 import sys
@@ -15,9 +17,9 @@ from app.crawlers.scheduler import run_scheduler
 
 if __name__ == "__main__":
     setup_logging(level="INFO")
-    print("🚀 职位爬虫调度器启动，将连接已登录的 Chrome，每 2 小时抓取一次...")
-    print("   按 Ctrl+C 停止")
+    print("职位爬虫启动：自动准备采集专用 Chrome，每 2 小时抓取一次。")
+    print("按 Ctrl+C 停止")
     try:
         asyncio.run(run_scheduler())
     except KeyboardInterrupt:
-        print("\n⏹ 爬虫调度器已停止")
+        print("\n爬虫调度器已停止")
