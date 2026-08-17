@@ -51,6 +51,7 @@ def init_db():
 
     Base.metadata.create_all(bind=engine)
     _ensure_schema_updates()
+    _ensure_jobs_unique_index()
 
 
 def _ensure_schema_updates():
@@ -72,6 +73,53 @@ def _ensure_schema_updates():
             conn.execute(text("ALTER TABLE users ADD COLUMN avatar VARCHAR(512) NULL"))
 
     _ensure_super_admin()
+
+
+def _ensure_jobs_unique_index():
+    """给 jobs 补 (platform, platform_job_id) 唯一索引。
+
+    create_all 不会修改已存在的表，所以老库拿不到模型里新加的约束。
+    爬虫按这两列做 upsert，没有唯一索引时并发写会留下重复职位。
+    """
+    inspector = inspect(engine)
+    if "jobs" not in inspector.get_table_names():
+        return
+    index_name = "uq_jobs_platform_job"
+    try:
+        # 新库由 create_all 建成表级 UNIQUE 约束，老库迁移后是唯一索引，两处都要查，
+        # 否则每次启动都会重复执行下面的 DDL。
+        existing = {idx["name"] for idx in inspector.get_indexes("jobs")}
+        existing |= {uc["name"] for uc in inspector.get_unique_constraints("jobs")}
+    except Exception as exc:
+        logger.warning("jobs_index_inspect_failed", extra={"error": str(exc)})
+        return
+    if index_name in existing:
+        return
+    try:
+        with engine.begin() as conn:
+            # 建唯一索引前先清掉历史重复行，每组只留 id 最大的那条。
+            # 多表 DELETE 是 MySQL 语法，其它方言用等价子查询。
+            if conn.dialect.name == "mysql":
+                conn.execute(text(
+                    "DELETE j FROM jobs j JOIN ("
+                    "  SELECT platform, platform_job_id, MAX(id) AS keep_id FROM jobs"
+                    "  GROUP BY platform, platform_job_id HAVING COUNT(*) > 1"
+                    ") d ON j.platform = d.platform AND j.platform_job_id = d.platform_job_id"
+                    " AND j.id <> d.keep_id"
+                ))
+            else:
+                conn.execute(text(
+                    "DELETE FROM jobs WHERE id NOT IN ("
+                    "  SELECT MAX(id) FROM jobs GROUP BY platform, platform_job_id"
+                    ")"
+                ))
+            conn.execute(text(
+                f"CREATE UNIQUE INDEX {index_name} ON jobs (platform, platform_job_id)"
+            ))
+        logger.info("jobs_unique_index_created")
+    except Exception as exc:
+        # 没建上不影响功能，只是失去重复保护，不该拦住服务启动
+        logger.warning("jobs_unique_index_failed", extra={"error": str(exc)})
 
 
 def _ensure_super_admin():

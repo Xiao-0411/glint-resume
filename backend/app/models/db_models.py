@@ -3,7 +3,7 @@ SQLAlchemy ORM models for MySQL persistence.
 """
 import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -148,6 +148,10 @@ class Application(Base):
 class Job(Base):
     """职位数据 - 爬虫抓取的真实职位"""
     __tablename__ = "jobs"
+    # 抓取按 (platform, platform_job_id) 做 upsert，没有唯一约束时并发写会产生重复行
+    __table_args__ = (
+        UniqueConstraint("platform", "platform_job_id", name="uq_jobs_platform_job"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     platform = Column(String(32), nullable=False, index=True, comment="平台: zhipin/zhaopin/liepin")

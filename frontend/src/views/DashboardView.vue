@@ -1026,7 +1026,7 @@ onMounted(() => {
 })
 
 function crawlerStatusLabel(status) {
-  return { success: '正常', running: '抓取中', empty: '无结果', failed: '失败', never: '未运行' }[status] || status
+  return { success: '正常', running: '抓取中', empty: '无结果', failed: '失败', blocked: '被风控/需登录', never: '未运行' }[status] || status
 }
 </script>
 
@@ -1179,7 +1179,10 @@ function crawlerStatusLabel(status) {
 .crawler-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
 .crawler-status-dot.success { background: #10b981; }
 .crawler-status-dot.running { background: #f59e0b; }
-.crawler-status-dot.empty, .crawler-status-dot.failed { background: #ef4444; }
+.crawler-status-dot.empty { background: #94a3b8; }
+.crawler-status-dot.failed { background: #ef4444; }
+/* 被风控/掉登录需要人工去浏览器处理，用醒目的橙色和失败区分开 */
+.crawler-status-dot.blocked { background: #f97316; }
 .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
 .dot.green { background: #10B981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15); }
 .dot.yellow { background: #F59E0B; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15); }
