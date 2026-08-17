@@ -42,6 +42,20 @@ HOME_URLS = {
 
 HOSTS = {"zhipin": "zhipin.com", "zhaopin": "zhaopin.com", "liepin": "liepin.com"}
 
+# 后台标签页在页面看来是 hidden，BOSS 等平台的可见性反爬会据此判定为机器人，
+# 表现就是「一连上就被踢回登录页」。三个平台并发时至多一个标签页在前台，
+# 所以必须在导航前覆盖可见性属性。参考 boss-zhipin-scraper 的同名处理。
+BACKGROUND_VISIBILITY_SCRIPT = """
+Object.defineProperty(document, 'hidden', {get: () => false});
+Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});
+Object.defineProperty(document, 'webkitHidden', {get: () => false});
+Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});
+document.hasFocus = () => true;
+"""
+
+# 被平台判定为未登录时页面会跳到这些路径
+LOGIN_URL_MARKERS = ("/web/user/", "/user/login", "login.", "/login", "passport")
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -92,7 +106,9 @@ class BrowserSessionCollector:
         self._playwright = await async_playwright().start()
         cdp_url = os.getenv("CRAWLER_CDP_URL", "http://127.0.0.1:9222")
         try:
-            self.browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+            # no_defaults 关掉 Playwright 默认的焦点仿真/媒体仿真等全局覆盖，
+            # 我们只对采集用的标签页按需开启，减少可被指纹识别的默认行为。
+            self.browser = await self._playwright.chromium.connect_over_cdp(cdp_url, no_defaults=True)
             contexts = self.browser.contexts
             if not contexts:
                 raise RuntimeError("远程 Chrome 没有可用的浏览器上下文")
@@ -113,6 +129,9 @@ class BrowserSessionCollector:
                 page = await self.context.new_page()
                 existing.append(page)
             self.pages[platform] = page
+            # 必须在任何导航之前装好可见性覆盖，否则首个页面就会以 hidden 状态
+            # 加载并被判定为机器人。add_init_script 对后续每次导航都生效。
+            await self._mask_background_state(platform, page)
             capture = ResponseCapture(page, platform)
             capture.attach()
             self.captures[platform] = capture
@@ -123,6 +142,33 @@ class BrowserSessionCollector:
                 logger.warning("platform_open_failed", extra={"platform": platform, "error": str(exc)})
         logger.info("browser_session_ready", extra={"platforms": list(self.pages)})
         print("已连接到现有 Chrome 登录会话，开始抓取三个平台职位。", flush=True)
+
+    # ------------------------------------------------------------------
+    # 反检测：让后台标签页看起来是前台
+    # ------------------------------------------------------------------
+    async def _mask_background_state(self, platform: str, page: Page) -> None:
+        """覆盖可见性属性并开启焦点仿真。
+
+        三个平台并发时至多一个标签页真的在前台，其余的 document.hidden 为 true，
+        BOSS 的可见性检查会据此把会话踢回登录页。焦点仿真只改渲染进程的认知，
+        不会激活窗口抢用户前台焦点。
+        """
+        try:
+            await page.add_init_script(BACKGROUND_VISIBILITY_SCRIPT)
+        except Exception as exc:
+            logger.warning("visibility_patch_failed", extra={"platform": platform, "error": str(exc)})
+        try:
+            session = await self.context.new_cdp_session(page)
+            await session.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+            await session.detach()
+        except Exception as exc:
+            # 拿不到焦点仿真也还有 JS 覆盖兜底，不该因此中断
+            logger.debug("focus_emulation_failed", extra={"platform": platform, "error": str(exc)})
+
+    @staticmethod
+    def _looks_like_login_page(url: str) -> bool:
+        low = url.lower()
+        return any(marker in low for marker in LOGIN_URL_MARKERS)
 
     # ------------------------------------------------------------------
     # 人类行为模拟
@@ -218,6 +264,13 @@ class BrowserSessionCollector:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         except Exception as exc:
             raise RuntimeError(f"打开搜索页失败: {exc}") from exc
+
+        # 被踢回登录页时早点报出来，不要干等捕获超时
+        if self._looks_like_login_page(page.url):
+            raise PlatformBlocked(
+                f"{PLATFORMS[platform]} 登录态失效，页面被跳转到 {page.url[:120]}；"
+                "请在该 Chrome 窗口里重新登录后再启动爬虫"
+            )
 
         captured = await capture.wait_next(timeout=CAPTURE_TIMEOUT)
         if captured is None:

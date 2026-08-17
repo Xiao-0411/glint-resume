@@ -13,11 +13,6 @@ if not exist "%CHROME%" (
 set "SOURCE=%LocalAppData%\Google\Chrome\User Data"
 set "PROFILE=%~dp0backend\.crawler_chrome_profile_connected"
 set "MARKER=%PROFILE%\.profile_seeded"
-if not exist "%SOURCE%\Default" (
-  echo Chrome Default profile not found: "%SOURCE%\Default"
-  pause
-  exit /b 1
-)
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$c=Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue; if($c){ exit 0 }; exit 1"
 if not errorlevel 1 (
@@ -29,7 +24,10 @@ if not errorlevel 1 (
 )
 
 echo Close every normal Chrome window first.
-echo On first run, your Default profile will be copied locally so existing logins are retained.
+echo.
+echo This uses a SEPARATE Chrome profile for crawling.
+echo The first time, you must log in to Boss Zhipin / Liepin / Zhaopin
+echo inside the browser window that opens. That login is then remembered.
 pause
 
 tasklist /FI "IMAGENAME eq chrome.exe" 2>nul | find /I "chrome.exe" >nul
@@ -39,29 +37,34 @@ if not errorlevel 1 (
   exit /b 1
 )
 
+rem The dedicated profile was seeded once from the main Chrome profile and now
+rem holds its own logins. Never re-copy over a working profile: re-copying can
+rem clobber a good session, and on Chrome 127+ cookies are sealed with
+rem App-Bound Encryption tied to the original install, so a fresh copy may not
+rem decrypt at all. If the crawler profile ever loses its login, just log in
+rem again inside the window this script opens.
+if not exist "%PROFILE%" mkdir "%PROFILE%"
 if not exist "%MARKER%" (
-  echo Copying the Default Chrome profile. This may take a minute...
-  if not exist "%PROFILE%" mkdir "%PROFILE%"
-  copy /Y "%SOURCE%\Local State" "%PROFILE%\Local State" >nul
-  robocopy "%SOURCE%\Default" "%PROFILE%\Default" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /XD "Cache" "Code Cache" "GPUCache" "Service Worker\CacheStorage" >nul
-  if errorlevel 8 (
-    echo Failed to copy the Chrome profile.
-    pause
-    exit /b 1
-  )
+  echo First run: a dedicated crawler Chrome profile will be created.
+  echo You will need to log in to the job sites inside the window that opens.
   type nul > "%MARKER%"
 )
 
 rem START requires an empty window title before the executable path.
+rem Keep --remote-debugging-port on a fixed non-zero port: port 0 would make
+rem Chrome report navigator.webdriver = true and give the anti-bot a free tell.
 start "" "%CHROME%" --remote-debugging-port=9222 --user-data-dir="%PROFILE%" --profile-directory=Default --no-first-run --no-default-browser-check
+
 if errorlevel 1 (
   echo Failed to start Chrome. Make sure all Chrome windows are closed.
   pause
   exit /b 1
 )
 
+echo.
 echo Chrome started on http://127.0.0.1:9222.
-echo Verify that Liepin, Boss Zhipin, and Zhaopin are logged in.
+echo Log in to Boss Zhipin, Liepin and Zhaopin in THIS window if you have not.
+echo Leave the Boss Zhipin tab in the FOREGROUND if you can.
 echo Then press any key to start the crawler using this same browser.
 pause >nul
 start "GlintCrawler" /D "%~dp0backend" cmd.exe /k ".venv\Scripts\python.exe run_crawler.py"
