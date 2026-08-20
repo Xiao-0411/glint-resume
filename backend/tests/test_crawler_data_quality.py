@@ -146,6 +146,62 @@ def test_classifier_normalizes_invalid_values():
     assert result["industry"] == "通用"
 
 
+def test_classifier_filters_recruitment_pitch_from_skills():
+    """招聘话术不能进 skills。
+
+    首批实跑中模型把"高底薪高提成，无外呼""定期团建，退役军人"这类卖点
+    当成技能写进 requirements，而 requirements 直接参与匹配度打分。
+    """
+    from app.services.job_classifier import _normalize
+
+    polluted = [
+        "无经验应届生，实习生", "可带团队，上海九亭", "高底薪高提成，无外呼",
+        "稳定全职，快速晋升", "定期团建，退役军人",
+        "需求分析", "产品设计", "原型设计",
+    ]
+    result = _normalize({"category": "产品经理", "level": "初级", "skills": polluted, "industry": "通用"})
+    assert result["skills"] == ["需求分析", "产品设计", "原型设计"]
+
+
+def test_classifier_keeps_genuine_skills():
+    """噪声过滤不能误杀真实技能。"""
+    from app.services.job_classifier import _looks_like_noise
+
+    for skill in ("Java", "Spring Boot", "MySQL", "需求分析", "用户研究", "Axure", "C++", "财务报表"):
+        assert not _looks_like_noise(skill), f"真实技能被误判为噪声: {skill}"
+
+    for noise in ("五险一金", "双休不加班", "高底薪高提成，无外呼", "计算机相关专业"):
+        assert _looks_like_noise(noise), f"招聘话术未被拦截: {noise}"
+
+
+def test_long_english_tech_names_survive_filter():
+    """英文技术栈常超过中文技能的长度上限，不能按同一阈值裁掉。
+
+    首次实现用统一的 12 字上限，把 Elasticsearch(13)、Kubernetes 等
+    误判成噪声，dry-run 显示会波及 126 条记录。
+    """
+    from app.services.job_classifier import _looks_like_noise
+
+    for skill in (
+        "Elasticsearch", "Kubernetes", "PostgreSQL", "TypeScript",
+        "React Native", "Google Cloud Platform", "CI/CD",
+    ):
+        assert not _looks_like_noise(skill), f"英文技术栈被误杀: {skill}"
+
+    # 中文侧仍收紧，整句卖点必须拦住
+    assert _looks_like_noise("稳定全职快速晋升定期团建")
+
+
+def test_classifier_dedupes_skills():
+    from app.services.job_classifier import _normalize
+
+    result = _normalize({
+        "category": "后端开发", "level": "中级", "industry": "金融",
+        "skills": ["Java", "java", "JAVA", "Spring"],
+    })
+    assert result["skills"] == ["Java", "Spring"]
+
+
 def test_classifier_extracts_json_from_wrapped_output():
     from app.services.job_classifier import _extract_json_array
 

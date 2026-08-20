@@ -53,11 +53,50 @@ SYSTEM_PROMPT = """你是招聘数据的分类引擎。根据岗位信息，为�
 
 要求：
 1. category 必须从给定类目中选一个最贴切的，不要自创；无法判断填"其他"。
-2. skills 提取 3-8 个具体技术栈或专业能力关键词，只保留岗位真正要求的，不要臆造。
+2. skills 只提取 3-8 个「可写进简历的专业能力或技术栈」，例如 Java、Spring、
+   需求分析、用户研究、财务报表。必须严格遵守：
+   - 只有在岗位信息中明确出现时才提取；信息不足就少给几个，甚至给空数组。
+   - 绝不把招聘话术当技能。以下都不是技能，一律不要输出：
+     薪酬福利（高底薪、五险一金、包吃住、双休、不加班）、
+     工作条件（坐班、上海九亭、稳定全职、可带团队、定期团建）、
+     招聘对象（无经验应届生、实习生、退役军人、计算机相关专业）、
+     公司卖点（快速晋升、扁平管理、大厂背景）。
+   - 岗位页上的分类勾选项不是技能。当出现形如
+     "B端产品/C端产品/G端产品/物联网产品/电商产品" 这样成组罗列的选项时，
+     说明那是平台的分类菜单而非岗位要求，最多保留一个最贴切的，其余丢弃。
+   - 单个技能不超过 12 个字，不要写成短句。
 3. level 从给定职级中选一个。
 4. industry 用 2-6 字概括所属行业，如"金融科技""跨境电商"；无法判断填"通用"。
 5. 严格输出 JSON 数组，不要任何解释文字、不要 markdown 代码块。
 6. 输出数组的长度和顺序必须与输入岗位完全一致，用 id 字段对应。"""
+
+# 招聘话术特征。这些词出现在"技能"里说明模型把卖点当成了能力要求，
+# 放进 requirements 会直接污染匹配度打分，必须在入库前拦掉。
+SKILL_NOISE_PATTERNS = (
+    "五险", "公积金", "双休", "包吃", "包住", "加班", "底薪", "提成", "薪资", "月薪",
+    "年薪", "补贴", "团建", "晋升", "福利", "全职", "兼职", "坐班", "外呼", "带团队",
+    "应届生", "实习生", "退役军人", "相关专业", "优先", "稳定", "急招", "长期",
+    "工作时间", "上班", "居住", "户口", "年龄",
+)
+
+
+def _looks_like_noise(skill: str) -> bool:
+    """判断一个"技能"其实是招聘话术或岗位分类选项。"""
+    value = skill.strip()
+    if not value:
+        return True
+    if any(sep in value for sep in ("，", ",", "、", "；", ";")):
+        # 技能是单一名词，含分隔符说明是被塞进来的一句话。
+        return True
+    if any(pattern in value for pattern in SKILL_NOISE_PATTERNS):
+        return True
+    # 长度上限按字符类型区分：中文技能名普遍很短，超过 12 字多为整句卖点；
+    # 但英文技术栈常见更长的单词（Elasticsearch=13、CircleCI/Kubernetes 等），
+    # 用统一阈值会误杀，因此仅对含中文的条目收紧。
+    has_chinese = any("一" <= char <= "鿿" for char in value)
+    limit = 12 if has_chinese else 24
+    return len(value) > limit
+
 
 
 def _config() -> tuple[str, str, str]:
@@ -126,10 +165,21 @@ def _normalize(item: Any) -> dict:
     skills = item.get("skills")
     if isinstance(skills, str):
         skills = [part.strip() for part in skills.split(",")]
-    skills = [str(s).strip() for s in (skills or []) if str(s).strip()][:8]
+    # 即便 prompt 已明确禁止，模型仍可能把招聘话术写进 skills；
+    # requirements 直接参与匹配度打分，这里再兜一道，宁缺毋滥。
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in (skills or []):
+        value = str(raw).strip()
+        if not value or _looks_like_noise(value):
+            continue
+        if value.lower() in seen:
+            continue
+        seen.add(value.lower())
+        cleaned.append(value)
     return {
         "category": category if category in JOB_CATEGORIES else "其他",
-        "skills": skills,
+        "skills": cleaned[:8],
         "level": level if level in EXPERIENCE_LEVELS else "不限",
         "industry": (str(item.get("industry") or "").strip() or "通用")[:12],
     }
