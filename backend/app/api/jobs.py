@@ -1,5 +1,6 @@
 """
 POST /api/jobs/search  ——  职位搜索与匹配分级
+GET  /api/jobs/detail/{job_id}  ——  按需获取完整岗位详情
 POST /api/jobs/adapt  ——  简历动态适配
 POST /api/jobs/apply  ——  一键投递（持久化到 MySQL）
 GET  /api/jobs/applications  ——  获取投递列表（从 DB 读取）
@@ -8,14 +9,18 @@ POST /api/jobs/applications/status  ——  更新投递状态（持久化）
 职位数据来自爬虫库（jobs 表）；库为空时按关键词实时抓取，不返回 mock 职位。
 """
 import datetime
+import logging
+import re
 import uuid
 import asyncio
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.auth_deps import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.db_models import Application, Job, User, CrawlerStatus
 from app.models.schemas import (
@@ -26,8 +31,13 @@ from app.mock.fallback import (
     KW_MAP,
 )
 from app.crawlers.scheduler import crawl_keyword
+from app.crawlers.external_boss import ExternalBossCrawler
+from app.crawlers.zhaopin import ZhaopinCrawler
+from app.crawlers.liepin import LiepinCrawler
+from app.services.location_catalog import cities_for_provinces, location_catalog
 
 router = APIRouter()
+logger = logging.getLogger("glint.jobs")
 
 
 @router.get("/jobs/crawler-status")
@@ -61,13 +71,49 @@ STATUS_LABEL_MAP = {
     "withdrawn": "已撤回",
 }
 
+CITY_NAMES = sorted(
+    [city["value"] for province in location_catalog() for city in province["cities"]],
+    key=len,
+    reverse=True,
+)
 
-def _db_job_search(keyword: str = "", db: DBSession = None, limit: int = 60) -> list:
+
+@router.get("/jobs/locations")
+async def job_locations():
+    """返回独立于职位库存量的全国省市筛选目录。"""
+    return {"provinces": location_catalog()}
+
+
+def _clean_title(value: str) -> str:
+    title = re.sub(r"\s+", " ", (value or "").strip())
+    title = re.split(r"【|\s+(?=\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[kK千万元])", title, maxsplit=1)[0]
+    return title[:100].strip(" -|·")
+
+
+def _clean_location(value: str) -> str:
+    raw = (value or "").strip()
+    city = next((name for name in CITY_NAMES if raw.startswith(name)), "")
+    if not city:
+        return raw or "全国"
+    suffix = raw[len(city):]
+    district = re.match(r"\s*[-·]\s*([\u4e00-\u9fff]{2,8}(?:区|县|市))", suffix)
+    return f"{city}·{district.group(1)}" if district else city
+
+
+def _db_job_search(
+    keyword: str = "",
+    locations: list[str] | None = None,
+    educations: list[str] | None = None,
+    db: DBSession = None,
+    limit: int = 60,
+) -> list:
     """从 MySQL jobs 表搜索职位"""
     if db is None:
         return []
 
     query = db.query(Job).filter(Job.is_active == True)
+    locations = [value.strip() for value in (locations or []) if value.strip()]
+    educations = [value.strip() for value in (educations or []) if value.strip()]
 
     if keyword:
         kw = f"%{keyword}%"
@@ -80,24 +126,104 @@ def _db_job_search(keyword: str = "", db: DBSession = None, limit: int = 60) -> 
             )
         )
 
-    rows = query.order_by(Job.crawled_at.desc(), Job.id.desc()).limit(limit).all()
+    if locations:
+        query = query.filter(or_(*(Job.location.like(f"%{value}%") for value in locations)))
+
+    if educations:
+        query = query.filter(or_(*(Job.education.like(f"%{value}%") for value in educations)))
+
+    candidate_limit = min(max(limit * 8, limit), 500)
+    rows = query.order_by(Job.crawled_at.desc(), Job.id.desc()).limit(candidate_limit).all()
+
+    buckets = {}
+    for row in rows:
+        city = next((name for name in CITY_NAMES if (row.location or "").startswith(name)), "其他")
+        buckets.setdefault(city, []).append(row)
+    balanced_rows = []
+    ordered_keys = [city for city in CITY_NAMES if city in buckets]
+    if "其他" in buckets:
+        ordered_keys.append("其他")
+    while len(balanced_rows) < limit and any(buckets.get(city) for city in ordered_keys):
+        for city in ordered_keys:
+            if buckets.get(city):
+                balanced_rows.append(buckets[city].pop(0))
+                if len(balanced_rows) == limit:
+                    break
 
     results = []
-    for row in rows:
+    for row in balanced_rows:
         results.append({
             "id": f"job_db_{row.id}",
-            "title": row.title,
+            "title": _clean_title(row.title),
             "company": row.company,
             "salary": row.salary or "薪资面议",
-            "location": row.location or "全国",
+            "location": _clean_location(row.location),
+            "education": row.education or "学历不限",
             "tags": row.tags or [],
-            "description": row.description or "",
+            "description": row.description if _has_full_detail(row) else "",
             "requirements": row.requirements or [],
             "platform": row.platform,
             "url": row.url or "",
             "crawledAt": row.crawled_at.isoformat() if row.crawled_at else "",
         })
     return results
+
+
+def _job_payload(row: Job, *, include_description: bool = True) -> dict:
+    return {
+        "id": f"job_db_{row.id}",
+        "title": _clean_title(row.title),
+        "company": row.company,
+        "salary": row.salary or "薪资面议",
+        "location": _clean_location(row.location),
+        "experience": row.experience or "经验不限",
+        "education": row.education or "学历不限",
+        "tags": row.tags or [],
+        "description": (row.description or "") if include_description else "",
+        "requirements": row.requirements or [],
+        "platform": row.platform,
+        "url": row.url or "",
+        "crawledAt": row.crawled_at.isoformat() if row.crawled_at else "",
+    }
+
+
+def _has_full_detail(row: Job) -> bool:
+    description = (row.description or "").strip()
+    if len(description) < 120:
+        return False
+    # 旧版列表抓取曾把整张卡片写进 description：通常会同时重复岗位名、
+    # 公司和薪资。即使文本很长，也不能视为已经抓取过的 JD。
+    repeated_fields = [row.title, row.company, row.salary]
+    if sum(bool(value and str(value).strip() in description) for value in repeated_fields) >= 2:
+        return False
+    if row.platform == "zhipin":
+        return True
+    return any(marker in description for marker in ("岗位职责", "职位职责", "任职要求", "职位要求", "职位描述"))
+
+
+def _crawler_for_platform(platform: str):
+    crawlers = {
+        "zhipin": ExternalBossCrawler,
+        "zhaopin": ZhaopinCrawler,
+        "liepin": LiepinCrawler,
+    }
+    crawler_class = crawlers.get(platform)
+    return crawler_class() if crawler_class else None
+
+
+def _is_trusted_job_url(platform: str, url: str) -> bool:
+    allowed_domains = {
+        "zhipin": "zhipin.com",
+        "zhaopin": "zhaopin.com",
+        "liepin": "liepin.com",
+    }
+    domain = allowed_domains.get(platform)
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and bool(domain) and (hostname == domain or hostname.endswith(f".{domain}"))
 
 
 def _calc_match(target_job: str, job: dict) -> dict:
@@ -156,8 +282,17 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
     """搜索真实职位。库为空时按当前关键词触发一次实时抓取，不返回 mock 职位。"""
     keyword = req.keyword or req.target_job or ""
 
+    selected_locations = [value.strip() for value in req.locations if value.strip()]
+    if req.provinces and not selected_locations:
+        selected_locations = cities_for_provinces(req.provinces)
+
     # 优先从数据库读取
-    db_jobs = _db_job_search(keyword=keyword, db=db)
+    db_jobs = _db_job_search(
+        keyword=keyword,
+        locations=selected_locations,
+        educations=req.educations,
+        db=db,
+    )
 
     if db_jobs:
         # 用真实数据做匹配分级
@@ -174,9 +309,15 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
         matched.sort(key=lambda x: x["matchScore"], reverse=True)
         return {"jobs": matched, "total": len(matched), "source": "db"}
 
-    if keyword:
+    filters_active = bool(req.provinces or req.locations or req.educations)
+    # 省份条件可能覆盖数十个城市，只在用户明确选到市时触发实时抓取。
+    should_crawl = bool(keyword) and not (req.provinces and not req.locations)
+    if should_crawl:
         try:
-            await asyncio.wait_for(crawl_keyword(keyword), timeout=35)
+            await asyncio.wait_for(
+                crawl_keyword(keyword, cities=req.locations or None),
+                timeout=settings.CRAWLER_REQUEST_TIMEOUT_SECONDS,
+            )
         except asyncio.TimeoutError:
             return {"jobs": [], "total": 0, "source": "live_unavailable", "message": "实时职位抓取超时，请稍后重试"}
         except Exception:
@@ -185,7 +326,12 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
         # 抓取器使用独立 DB 会话写入；结束本请求旧的读事务，避免 MySQL
         # REPEATABLE READ 快照看不到刚提交的职位。
         db.rollback()
-        db_jobs = _db_job_search(keyword=keyword, db=db)
+        db_jobs = _db_job_search(
+            keyword=keyword,
+            locations=selected_locations,
+            educations=req.educations,
+            db=db,
+        )
         if db_jobs:
             matched = []
             for job in db_jobs:
@@ -200,7 +346,68 @@ async def job_search(req: JobSearchRequest, current_user: User = Depends(get_cur
             matched.sort(key=lambda x: x["matchScore"], reverse=True)
             return {"jobs": matched, "total": len(matched), "source": "live"}
 
-    return {"jobs": [], "total": 0, "source": "empty", "message": "暂无匹配的真实职位，请更换关键词后重试"}
+    message = (
+        "当前筛选条件下暂无匹配职位，请调整筛选条件后重试"
+        if filters_active
+        else "暂无匹配的真实职位，请更换关键词后重试"
+    )
+    return {"jobs": [], "total": 0, "source": "empty", "message": message}
+
+
+@router.get("/jobs/detail/{job_id}")
+async def job_detail(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    """返回完整岗位详情；数据库只有摘要时按平台即时补抓并持久化。"""
+    row = db.query(Job).filter(Job.id == job_id, Job.is_active == True).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="职位不存在或已失效")
+
+    if _has_full_detail(row):
+        return {"job": _job_payload(row), "detailSource": "cache"}
+
+    crawler = _crawler_for_platform(row.platform)
+    if crawler is None or not _is_trusted_job_url(row.platform, row.url or ""):
+        return {
+            "job": _job_payload(row, include_description=False),
+            "detailSource": "summary",
+            "message": "该招聘平台暂未提供可读取的完整岗位详情",
+        }
+
+    try:
+        detail = await asyncio.wait_for(
+            crawler.fetch_detail(_job_payload(row)),
+            timeout=settings.CRAWLER_DETAIL_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        detail = {}
+        message = "岗位详情加载超时，可查看招聘平台原始职位"
+    except Exception as exc:
+        detail = {}
+        logger.warning("job_detail_fetch_failed", extra={"job_id": row.id, "platform": row.platform, "error": str(exc)})
+        error_text = str(exc)
+        message = error_text if "登录状态已失效" in error_text else "岗位详情暂时无法读取，可查看招聘平台原始职位"
+    finally:
+        await crawler.close()
+
+    description = str(detail.get("description") or "").strip()
+    requirements = detail.get("requirements") if isinstance(detail.get("requirements"), list) else []
+    if description:
+        row.description = description
+        if requirements:
+            row.requirements = requirements
+        row.updated_at = datetime.datetime.now(datetime.timezone.utc)
+        db.commit()
+        db.refresh(row)
+        return {"job": _job_payload(row), "detailSource": "live"}
+
+    return {
+        "job": _job_payload(row, include_description=False),
+        "detailSource": "summary",
+        "message": message if "message" in locals() else "岗位详情暂时无法读取，可查看招聘平台原始职位",
+    }
 
 
 @router.post("/jobs/adapt")
@@ -327,8 +534,11 @@ async def update_application_status(
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="投递记录不存在")
 
+    if req.status not in STATUS_LABEL_MAP:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="投递状态不合法")
+
     now = datetime.datetime.now(datetime.timezone.utc)
-    label = STATUS_LABEL_MAP.get(req.status, req.status)
+    label = STATUS_LABEL_MAP[req.status]
 
     history = list(application.status_history or [])
     history.append({"status": req.status, "at": now.isoformat(), "label": label})

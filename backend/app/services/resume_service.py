@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from app.core.prompts import STAR_L_REWRITE_PROMPT, UPLOAD_RESUME_EVAL_PROMPT
 from app.services import llm_service
@@ -17,7 +17,11 @@ logger = logging.getLogger("glint.resume")
 
 # ====== 1. 基于对话历史生成简历 ======
 
-async def generate_resume_from_session(session_id: str, target_job: str = "") -> Dict:
+async def generate_resume_from_session(
+    session_id: str,
+    target_job: str = "",
+    user_id: Optional[str] = None,
+) -> Dict:
     """
     full pipeline:
       优先使用 session.extracted(增量提取的数据),兜底才用 extract_profile
@@ -26,7 +30,7 @@ async def generate_resume_from_session(session_id: str, target_job: str = "") ->
 
     # 优先用增量提取的数据
     from app.store.db_store import session_store
-    session = session_store.get(session_id)
+    session = session_store.get(session_id, user_id)
     extracted = session.get("extracted", {}) if session else {}
 
     if extracted and (extracted.get("fullname") or extracted.get("education") or extracted.get("experiences")):
@@ -48,7 +52,7 @@ async def generate_resume_from_session(session_id: str, target_job: str = "") ->
         # 避免明明聊过经历却拿到示例简历。
         if not profile["experiences"]:
             logger.info("generate_resume_reextract_for_experiences")
-            recovered = await extract_profile(session_id)
+            recovered = await extract_profile(session_id, user_id)
             if recovered.get("experiences"):
                 profile["experiences"] = recovered["experiences"]
                 # 对话里聊到但增量提取漏掉的字段一并补齐
@@ -58,7 +62,7 @@ async def generate_resume_from_session(session_id: str, target_job: str = "") ->
     else:
         # 兜底:用完整对话历史提取
         logger.info("generate_resume_fallback_extract")
-        profile = await extract_profile(session_id)
+        profile = await extract_profile(session_id, user_id)
         if not profile:
             logger.warning("generate_resume_empty_profile")
             return _empty_resume(target_job)

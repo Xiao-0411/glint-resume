@@ -3,6 +3,7 @@
 """
 import asyncio
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 from typing import List, Optional
@@ -29,6 +30,40 @@ JOB_KEYWORDS = [
     "人工智能", "大数据", "网络安全", "嵌入式", "游戏策划",
     "产品运营", "新媒体运营", "电商运营", "技术支持", "实习生",
 ]
+
+DEFAULT_CRAWLER_CITIES = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "西安"]
+
+
+def select_keywords(keywords: List[str] = None) -> List[str]:
+    """Bound scheduled crawl volume while keeping explicit live searches intact."""
+    if keywords is not None:
+        return keywords
+    raw_limit = os.getenv("CRAWLER_MAX_KEYWORDS", "5")
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise RuntimeError("CRAWLER_MAX_KEYWORDS 必须是整数") from exc
+    if not 1 <= limit <= len(JOB_KEYWORDS):
+        raise RuntimeError(f"CRAWLER_MAX_KEYWORDS 必须在 1 到 {len(JOB_KEYWORDS)} 之间")
+    return JOB_KEYWORDS[:limit]
+
+
+def select_cities(cities: List[str] = None) -> List[str]:
+    """选择抓取城市；显式传入的城市用于用户搜索，否则使用轮询配置。"""
+    if cities is not None:
+        return [city.strip() for city in cities if city and city.strip()]
+
+    raw = os.getenv("CRAWLER_CITIES", ",".join(DEFAULT_CRAWLER_CITIES))
+    selected = [city.strip() for city in raw.split(",") if city.strip()]
+    if not selected:
+        selected = DEFAULT_CRAWLER_CITIES[:]
+    try:
+        limit = int(os.getenv("CRAWLER_MAX_CITIES", str(min(4, len(selected)))))
+    except ValueError as exc:
+        raise RuntimeError("CRAWLER_MAX_CITIES 必须是整数") from exc
+    if not 1 <= limit <= len(selected):
+        raise RuntimeError(f"CRAWLER_MAX_CITIES 必须在 1 到 {len(selected)} 之间")
+    return selected[:limit]
 
 
 class BaseCrawler(ABC):
@@ -76,9 +111,13 @@ class BaseCrawler(ABC):
         raise last_error
 
     @abstractmethod
-    async def crawl(self, keywords: List[str] = None) -> List[dict]:
+    async def crawl(self, keywords: List[str] = None, cities: List[str] = None) -> List[dict]:
         """抓取职位列表，返回标准化 dict 列表"""
         ...
+
+    async def fetch_detail(self, job: dict) -> dict:
+        """按需抓取单个岗位详情；不支持的平台返回空字典。"""
+        return {}
 
     def normalize_job(self, raw: dict) -> dict:
         """标准化为统一格式：

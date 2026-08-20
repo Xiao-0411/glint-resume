@@ -32,7 +32,7 @@ def latest_session(current_user: User = Depends(get_current_user)):
     session = session_store.get_latest_for_user(current_user.id)
     latest_resume = None
     if session:
-        latest_resume = session_store.get_latest_resume(session["session_id"])
+        latest_resume = session_store.get_latest_resume(session["session_id"], current_user.id)
     if latest_resume is None:
         latest_resume = session_store.get_latest_resume_for_user(current_user.id)
     return {

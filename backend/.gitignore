@@ -10,3 +10,8 @@ venv/
 .idea/
 .vscode/
 uploads/
+vendor/*
+!vendor/boss-zhipin-scraper/
+!vendor/boss-zhipin-scraper/**
+vendor/boss-zhipin-scraper/**/__pycache__/
+vendor/boss-zhipin-scraper/**/*.py[cod]

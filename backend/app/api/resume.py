@@ -30,7 +30,13 @@ async def generate_resume(
 ):
     user_id = current_user.id
     req.target_job = sanitize_target_job(req.target_job)
-    session_store.get_or_create(req.session_id, req.target_job, user_id)
+    try:
+        session_store.get_or_create(req.session_id, req.target_job, user_id)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="该会话属于其他用户",
+        )
 
     def save_result(resume, quality_report, source="chat"):
         resume_id = session_store.save_resume(
@@ -68,7 +74,7 @@ async def generate_resume(
             endpoint="/api/resume/generate",
             source="resume_generate",
         ):
-            resume = await generate_resume_from_session(req.session_id, req.target_job)
+            resume = await generate_resume_from_session(req.session_id, req.target_job, user_id)
             # 没有经历就没有可写的简历。此时绝不能返回示例内容:
             # 用户会拿到一份姓名和项目都不属于自己的简历,却标着"基于真实经历重塑"。
             # 宁可明确告知需要继续补充,也不伪造。

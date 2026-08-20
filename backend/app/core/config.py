@@ -47,6 +47,9 @@ class Settings:
     # 本地端口,不必每次改 .env。仅在 APP_ENV=development 时生效。
     CORS_ALLOW_LOCAL_ANY_PORT: bool = os.getenv("CORS_ALLOW_LOCAL_ANY_PORT", "true").lower() == "true"
     PORT: int = int(os.getenv("PORT", "8000"))
+    CRAWLER_REQUEST_TIMEOUT_SECONDS: int = int(os.getenv("CRAWLER_REQUEST_TIMEOUT_SECONDS", "180"))
+    CRAWLER_DETAIL_TIMEOUT_SECONDS: int = int(os.getenv("CRAWLER_DETAIL_TIMEOUT_SECONDS", "45"))
+    CRAWLER_INTERVAL_SECONDS: int = int(os.getenv("CRAWLER_INTERVAL_SECONDS", "60"))
 
     # Auth
     AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "")
@@ -136,6 +139,10 @@ def _validate_auth_secret(cfg: "Settings") -> None:
     判定是否为生产:CORS 里出现了非 localhost 的来源。
     """
     if cfg.AUTH_SECRET_KEY:
+        if cfg.is_production and len(cfg.AUTH_SECRET_KEY) < 32:
+            raise RuntimeError(
+                "生产环境 AUTH_SECRET_KEY 至少需要 32 个字符，以避免 JWT 签名密钥过弱。"
+            )
         return
 
     if cfg.has_public_origin:

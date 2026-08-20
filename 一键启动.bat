@@ -73,7 +73,7 @@ if not exist "%VENV_PYTHON%" (
         exit /b 1
     )
 )
-"%VENV_PYTHON%" -c "import fastapi, multipart" 2>nul
+"%VENV_PYTHON%" -c "import fastapi, multipart, requests, websocket" 2>nul
 if !errorlevel! neq 0 (
     echo Installing backend dependencies...
     "%VENV_PYTHON%" -m pip install -r "%BACKEND_DIR%\requirements.txt" -q
@@ -126,23 +126,37 @@ if !errorlevel! neq 0 (
 )
 echo [OK] Frontend started
 
-echo [Extra] Starting Job Crawler (every 2 hours)...
+echo [Extra] Starting Job Crawler (interval configured in backend\.env)...
+powershell -NoProfile -Command "$c=Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue; if($c){ exit 0 }; exit 1" >nul 2>&1
+if !errorlevel! neq 0 echo [WARN] Recruitment CDP is not listening. Run the three-site login browser launcher first; other services will still start.
 start "GlintCrawler - Login Required" cmd /k "cd /d "%BACKEND_DIR%" && "%VENV_PYTHON%" run_crawler.py"
 echo [OK] Crawler started
 echo.
 
-rem 线上架构: sgjl.cloud 前端在 Cloudflare Pages, API 经本机 Tunnel 暴露为 api.sgjl.cloud。
-rem cloudflared 不是系统服务, 重启电脑就断 -> 线上登录报 Network Error, 所以随本脚本一起拉起。
+rem Production: sgjl.cloud is hosted on Cloudflare Pages; api.sgjl.cloud reaches this backend through Tunnel.
+rem cloudflared is not a system service, so launch it here to restore the API after a reboot.
 echo [Extra] Starting Cloudflare Tunnel (api.sgjl.cloud)...
 set "CLOUDFLARED_EXE="
-for /f "delims=" %%I in ('where cloudflared.exe 2^>nul') do if not defined CLOUDFLARED_EXE set "CLOUDFLARED_EXE=%%I"
-if not defined CLOUDFLARED_EXE if exist "%LocalAppData%\Microsoft\WinGet\Links\cloudflared.exe" set "CLOUDFLARED_EXE=%LocalAppData%\Microsoft\WinGet\Links\cloudflared.exe"
-if defined CLOUDFLARED_EXE (
-    start "GlintTunnel" /MIN cmd /c ""%CLOUDFLARED_EXE%" tunnel --config "%USERPROFILE%\.cloudflared\config-glint.yml" run"
-    echo [OK] Tunnel started - https://api.sgjl.cloud now points to this machine
-    echo      Tip: if it cannot connect, allow argotunnel.com / port 7844 in your proxy app
+for /f "delims=" %%I in ('where cloudflared.exe 2^>nul') do if not defined CLOUDFLARED_EXE if exist "%%I" set "CLOUDFLARED_EXE=%%I"
+if not defined CLOUDFLARED_EXE if exist "%LocalAppData%\Microsoft\WinGet\Links\cloudflared.exe" (
+    for %%I in ("%LocalAppData%\Microsoft\WinGet\Links\cloudflared.exe") do if not "%%~zI"=="0" set "CLOUDFLARED_EXE=%%~fI"
+)
+if not defined CLOUDFLARED_EXE (
+    echo [ERROR] cloudflared.exe is missing or its WinGet link is broken.
+    echo         Install Cloudflare cloudflared, then run this launcher again.
+) else if not exist "%USERPROFILE%\.cloudflared\config-glint.yml" (
+    echo [ERROR] Tunnel config not found: %USERPROFILE%\.cloudflared\config-glint.yml
 ) else (
-    echo [SKIP] cloudflared not found - https://api.sgjl.cloud will stay offline
+    start "GlintTunnel" /MIN /D "%~dp0" cmd /d /c ""%CLOUDFLARED_EXE%" tunnel --config "%USERPROFILE%\.cloudflared\config-glint.yml" run ^> "%LOG_DIR%\cloudflared.log" 2^>^&1"
+    echo Waiting for public API health check...
+    powershell -NoProfile -Command "$ok=$false; $deadline=(Get-Date).AddSeconds(15); do { try { $r=Invoke-RestMethod 'https://api.sgjl.cloud/api/health' -TimeoutSec 3; if($r.status -eq 'ok'){ $ok=$true; break } } catch {}; Start-Sleep -Seconds 1 } while((Get-Date) -lt $deadline); if($ok){ exit 0 } else { exit 1 }" >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo [OK] Tunnel is online - https://api.sgjl.cloud/api/health returned ok
+    ) else (
+        echo [ERROR] Tunnel did not become reachable within 15 seconds.
+        echo         Check: %LOG_DIR%\cloudflared.log
+        echo         Also allow Cloudflare Tunnel traffic on port 7844.
+    )
 )
 echo.
 
@@ -151,7 +165,7 @@ echo   ALL SERVICES STARTED SUCCESSFULLY!
 echo.
 echo   Frontend: http://localhost:5173/
 echo   Backend:  http://localhost:8000/docs
-echo   Crawler:  running in background (every 2h)
+echo   Crawler:  running in background (see CRAWLER_INTERVAL_SECONDS)
 echo   Tunnel:   https://api.sgjl.cloud -^> localhost:8000
 echo.
 echo   Close this window to stop all services

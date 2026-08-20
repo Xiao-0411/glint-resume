@@ -19,7 +19,7 @@ import json
 import logging
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sse_starlette.sse import EventSourceResponse
 
 from app.core.auth_deps import get_current_user
@@ -67,14 +67,23 @@ async def chat(
     req.user_message = sanitized
     req.target_job = sanitize_target_job(req.target_job)
 
+    # Complete the ownership check before opening the SSE response. Raising from
+    # inside the generator would otherwise turn a 403 into a broken 200 stream.
+    try:
+        session_store.get_or_create(req.session_id, req.target_job, user_id)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="该会话属于其他用户",
+        )
+
     async def event_generator() -> AsyncGenerator[dict, None]:
         # ==== 走 mock 兜底 ====
         if not settings.llm_available:
             mock = mock_chat_reply(req.target_job, req.user_msg_count)
             # 记录到 session
-            session_store.get_or_create(req.session_id, req.target_job, user_id)
-            session_store.append_message(req.session_id, "user", req.user_message)
-            session_store.set_stage(req.session_id, mock["stage"])
+            session_store.append_message(req.session_id, "user", req.user_message, user_id)
+            session_store.set_stage(req.session_id, mock["stage"], user_id)
 
             # 模拟流式
             for chunk in _split_for_stream(mock["reply"], chunk_size=4):
@@ -84,7 +93,7 @@ async def chat(
                 }
                 await asyncio.sleep(0.025)  # ~40 字符/秒,自然感
 
-            session_store.append_message(req.session_id, "assistant", mock["reply"])
+            session_store.append_message(req.session_id, "assistant", mock["reply"], user_id)
             yield {
                 "event": "done",
                 "data": json.dumps({
@@ -117,14 +126,14 @@ async def chat(
                     })
                     # LLM 失败,fallback 到 mock
                     mock = mock_chat_reply(req.target_job, req.user_msg_count)
-                    session_store.set_stage(req.session_id, mock["stage"])
+                    session_store.set_stage(req.session_id, mock["stage"], user_id)
                     for chunk in _split_for_stream(mock["reply"], chunk_size=4):
                         yield {
                             "event": "delta",
                             "data": json.dumps({"text": chunk}, ensure_ascii=False)
                         }
                         await asyncio.sleep(0.025)
-                    session_store.append_message(req.session_id, "assistant", mock["reply"])
+                    session_store.append_message(req.session_id, "assistant", mock["reply"], user_id)
                     yield {
                         "event": "done",
                         "data": json.dumps({

@@ -1,8 +1,8 @@
 """
 Pydantic 数据模型 —— 所有前后端交互的请求/响应结构
 """
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any, Annotated
+from pydantic import BaseModel, Field, model_validator
 
 
 # ============ Auth ============
@@ -84,18 +84,18 @@ class AdminUserUpdateRequest(BaseModel):
 # ============ Sessions ============
 
 class AttachSessionRequest(BaseModel):
-    session_id: str = Field(..., description="要绑定到当前用户的会话 ID")
-    target_job: str = Field("", description="会话目标岗位")
+    session_id: str = Field(..., min_length=1, max_length=64, description="要绑定到当前用户的会话 ID")
+    target_job: str = Field("", max_length=100, description="会话目标岗位")
 
 
 # ============ Chat ============
 
 class ChatRequest(BaseModel):
-    session_id: str = Field(..., description="会话 ID,前端生成")
+    session_id: str = Field(..., min_length=1, max_length=64, description="会话 ID,前端生成")
     user_id: Optional[str] = Field(None, description="用户 ID,未登录可不传")
-    target_job: str = Field("", description="用户目标岗位")
-    user_message: str = Field(..., description="用户本轮输入")
-    user_msg_count: int = Field(..., description="用户消息总数(含本条)")
+    target_job: str = Field("", max_length=100, description="用户目标岗位")
+    user_message: str = Field(..., min_length=1, max_length=4000, description="用户本轮输入")
+    user_msg_count: int = Field(..., ge=1, le=1000, description="用户消息总数(含本条)")
 
 
 class ChatResponseMeta(BaseModel):
@@ -109,26 +109,55 @@ class ChatResponseMeta(BaseModel):
 # ============ Resume ============
 
 class GenerateResumeRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(..., min_length=1, max_length=64)
     user_id: Optional[str] = None
-    target_job: str = ""
+    target_job: str = Field("", max_length=100)
 
 
 class EvaluateTextRequest(BaseModel):
-    text: str = Field(..., description="PDF 解析后的简历文本")
-    file_name: str = Field("uploaded.pdf")
-    session_id: Optional[str] = Field(None, description="当前会话 ID")
+    text: str = Field(..., min_length=1, max_length=100_000, description="PDF 解析后的简历文本")
+    file_name: str = Field("uploaded.pdf", max_length=255)
+    session_id: Optional[str] = Field(None, min_length=1, max_length=64, description="当前会话 ID")
     user_id: Optional[str] = Field(None, description="用户 ID,未登录可不传")
-    target_job: str = Field("", description="目标岗位")
+    target_job: str = Field("", max_length=100, description="目标岗位")
 
 
 class EvaluateResumeRequest(BaseModel):
     """对已有简历对象直接重评(用户编辑后)。保留其 exp_id,
     避免走"上传文本"管线重新生成简历导致 evidence/exp_id 与现有简历错位。"""
-    resume: Dict[str, Any]
-    target_job: str = ""
-    session_id: Optional[str] = Field(None, description="当前会话 ID")
+    resume: Dict[str, Any] = Field(..., max_length=20)
+    target_job: str = Field("", max_length=100)
+    session_id: Optional[str] = Field(None, min_length=1, max_length=64, description="当前会话 ID")
     user_id: Optional[str] = Field(None, description="用户 ID,未登录可不传")
+
+    @model_validator(mode="after")
+    def validate_resume_complexity(self):
+        nodes = 0
+
+        def walk(value, depth=0):
+            nonlocal nodes
+            nodes += 1
+            if nodes > 5000:
+                raise ValueError("简历内容过于复杂")
+            if depth > 12:
+                raise ValueError("简历嵌套层级过深")
+            if isinstance(value, str) and len(value) > 20_000:
+                raise ValueError("简历单个字段不能超过 20000 字符")
+            if isinstance(value, list):
+                if len(value) > 200:
+                    raise ValueError("简历单个列表不能超过 200 项")
+                for item in value:
+                    walk(item, depth + 1)
+            elif isinstance(value, dict):
+                if len(value) > 100:
+                    raise ValueError("简历单个对象不能超过 100 个字段")
+                for key, item in value.items():
+                    if len(str(key)) > 128:
+                        raise ValueError("简历字段名过长")
+                    walk(item, depth + 1)
+
+        walk(self.resume)
+        return self
 
 
 class ResumeBasic(BaseModel):
@@ -227,20 +256,23 @@ class ResumeWithReport(BaseModel):
 # ============ Jobs (求职加速) ============
 
 class JobSearchRequest(BaseModel):
-    keyword: str = ""
-    target_job: str = ""
+    keyword: str = Field("", max_length=100)
+    target_job: str = Field("", max_length=100)
+    provinces: List[Annotated[str, Field(min_length=1, max_length=64)]] = Field(default_factory=list, max_length=34)
+    locations: List[Annotated[str, Field(min_length=1, max_length=64)]] = Field(default_factory=list, max_length=400)
+    educations: List[Annotated[str, Field(min_length=1, max_length=32)]] = Field(default_factory=list, max_length=10)
 
 
 class JobAdaptRequest(BaseModel):
-    job_id: str = ""
-    target_job: str = ""
+    job_id: str = Field("", max_length=64)
+    target_job: str = Field("", max_length=100)
 
 
 class JobApplyRequest(BaseModel):
-    job_id: str = ""
-    resume_version: str = "original"
+    job_id: str = Field("", max_length=64)
+    resume_version: str = Field("original", max_length=32)
 
 
 class ApplicationStatusRequest(BaseModel):
-    application_id: str = ""
-    status: str = ""
+    application_id: str = Field("", max_length=64)
+    status: str = Field("", max_length=32)

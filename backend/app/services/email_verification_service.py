@@ -18,6 +18,17 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PURPOSE_REGISTER = "register"
 
 
+def _utcnow_naive() -> datetime.datetime:
+    """Return UTC without tzinfo for MySQL ``DATETIME`` columns."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def _as_utc_naive(value: datetime.datetime) -> datetime.datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
 class EmailCodeCooldownError(Exception):
     def __init__(self, retry_after: int):
         super().__init__("Email code cooldown")
@@ -42,7 +53,7 @@ def create_and_send_code(
     purpose: str = PURPOSE_REGISTER,
 ) -> dict:
     email = normalize_email(email)
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = _utcnow_naive()
 
     latest = (
         db.query(EmailVerificationCode)
@@ -54,7 +65,7 @@ def create_and_send_code(
         .first()
     )
     if latest and latest.sent_at:
-        elapsed = int((now - latest.sent_at).total_seconds())
+        elapsed = int((now - _as_utc_naive(latest.sent_at)).total_seconds())
         if elapsed < settings.EMAIL_CODE_COOLDOWN_SECONDS:
             raise EmailCodeCooldownError(settings.EMAIL_CODE_COOLDOWN_SECONDS - elapsed)
 
@@ -94,7 +105,7 @@ def verify_code(
 ) -> bool:
     email = normalize_email(email)
     code = (code or "").strip()
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = _utcnow_naive()
 
     row = (
         db.query(EmailVerificationCode)

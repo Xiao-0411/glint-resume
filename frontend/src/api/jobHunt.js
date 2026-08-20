@@ -3,7 +3,7 @@
  */
 import {
   jobSearch, adaptResume, applyJob,
-  getApplications, updateApplicationStatus, getCrawlerStatus
+  getApplications, updateApplicationStatus, getCrawlerStatus, getJobDetail, getJobLocations
 } from './backend'
 
 export const jobHuntApi = {
@@ -12,5 +12,7 @@ export const jobHuntApi = {
   apply: (payload) => applyJob(payload),
   getApplications: () => getApplications(),
   updateApplicationStatus: (payload) => updateApplicationStatus(payload),
-  getCrawlerStatus: () => getCrawlerStatus()
+  getCrawlerStatus: () => getCrawlerStatus(),
+  getLocations: () => getJobLocations(),
+  getDetail: (jobId) => getJobDetail(jobId)
 }

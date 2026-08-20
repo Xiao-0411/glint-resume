@@ -47,6 +47,55 @@
           </button>
         </div>
 
+        <div class="job-filters" aria-label="职位筛选">
+          <span class="filter-title">筛选</span>
+          <label class="filter-field">
+            <span>省份</span>
+            <NSelect
+              v-model:value="selectedProvinces"
+              class="filter-select"
+              clearable
+              filterable
+              :options="provinceOptions"
+              placeholder="不限省份"
+              @update:value="onProvinceChange"
+            />
+          </label>
+          <label class="filter-field">
+            <span>城市</span>
+            <NSelect
+              v-model:value="selectedLocations"
+              class="filter-select"
+              multiple
+              clearable
+              filterable
+              :disabled="!cityProvince"
+              :options="cityOptions"
+              :max-tag-count="'responsive'"
+              :placeholder="cityProvince ? '可多选城市' : '请先选择省份'"
+              @update:value="onLocationChange"
+            />
+          </label>
+          <label class="filter-field">
+            <span>学历</span>
+            <NSelect
+              v-model:value="selectedEducations"
+              class="filter-select"
+              multiple
+              clearable
+              :options="educationOptions"
+              :max-tag-count="'responsive'"
+              placeholder="不限学历"
+            />
+          </label>
+          <button class="filter-apply-btn" :disabled="huntStore.searchLoading" @click="onSearch">
+            应用筛选
+          </button>
+          <button v-if="hasActiveFilters" class="filter-clear-btn" @click="clearFilters">
+            清空
+          </button>
+        </div>
+
         <!-- 匹配分级图例 -->
         <div class="legend">
           <span class="legend-item"><span class="dot green"></span>高匹配 可直接投递</span>
@@ -56,10 +105,15 @@
 
         <div v-if="crawlerStatuses.length" class="crawler-status-bar">
           <span class="crawler-status-title">数据渠道</span>
-          <span v-for="item in crawlerStatuses" :key="item.platform" class="crawler-status-item">
+          <span
+            v-for="item in crawlerStatuses"
+            :key="item.platform"
+            class="crawler-status-item"
+            :title="crawlerStatusTooltip(item)"
+          >
             <span :class="['crawler-status-dot', item.status]"></span>
             {{ item.label }} {{ crawlerStatusLabel(item.status) }}
-            <small v-if="item.lastJobCount">{{ item.lastJobCount }} 条</small>
+            <small v-if="item.lastJobCount">{{ crawlerJobCountLabel(item) }}</small>
           </span>
         </div>
 
@@ -103,6 +157,7 @@
                     <span class="job-company">{{ job.company }}</span>
                     <span class="job-sep">·</span>
                     <span class="job-location">{{ job.location }}</span>
+                    <span v-if="job.education && !job.tags?.includes(job.education)" class="job-tag">{{ job.education }}</span>
                     <span v-for="tag in job.tags" :key="tag" class="job-tag">{{ tag }}</span>
                     <span v-if="job.platform" class="job-source">{{ platformLabel(job.platform) }}</span>
                   </div>
@@ -117,7 +172,7 @@
                 </div>
               </div>
 
-              <p class="job-desc">{{ job.description }}</p>
+              <p v-if="job.description" class="job-desc">{{ job.description }}</p>
               <div v-if="job.crawledAt || job.url" class="job-freshness">
                 <span v-if="job.crawledAt">抓取于 {{ formatDateTime(job.crawledAt) }}</span>
                 <a v-if="job.url" :href="job.url" target="_blank" rel="noopener noreferrer" @click.stop>查看原始职位</a>
@@ -611,10 +666,22 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               职位描述
             </h4>
-            <p class="detail-desc">{{ detailJob.description }}</p>
+            <div v-if="detailLoading" class="detail-loading">
+              <div class="spinner"></div>
+              <span>正在从招聘平台获取完整岗位详情...</span>
+            </div>
+            <div v-else-if="detailError" class="detail-empty">
+              <p>{{ detailError }}</p>
+              <a v-if="detailJob.url" :href="detailJob.url" target="_blank" rel="noopener noreferrer">查看招聘平台原始职位</a>
+            </div>
+            <p v-else-if="detailJob.description" class="detail-desc">{{ detailJob.description }}</p>
+            <div v-else class="detail-empty">
+              <p>该职位暂未提供完整岗位描述</p>
+              <a v-if="detailJob.url" :href="detailJob.url" target="_blank" rel="noopener noreferrer">查看招聘平台原始职位</a>
+            </div>
           </div>
 
-          <div class="detail-section">
+          <div v-if="detailJob.requirements?.length" class="detail-section">
             <h4 class="detail-section-title">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
               能力要求
@@ -814,6 +881,7 @@ import { useJobHuntStore } from '@/stores/jobHunt'
 import { useAuthStore } from '@/stores/auth'
 import { jobHuntApi } from '@/api/jobHunt'
 import ResumePreview from '@/components/ResumePreview.vue'
+import { NSelect } from 'naive-ui'
 
 const router = useRouter()
 const chatStore = useChatStore()
@@ -826,12 +894,48 @@ const hasResume = computed(() => !!chatStore.resumeData || auth.resumeHistory.le
 
 const activeTab = ref('search')
 const searchKeyword = ref('')
+// 省份是单选；城市选择后省份会清空，但保留 cityProvince 作为城市列表上下文。
+const selectedProvinces = ref(null)
+const cityProvince = ref('')
+const selectedLocations = ref([])
+const selectedEducations = ref([])
 const searchMessage = ref('输入关键词搜索真实职位，结果来自招聘平台实时数据')
 const crawlerStatuses = ref([])
 const appliedJobIds = reactive({})
+const locationCatalog = ref([])
+const provinceOptions = computed(() => locationCatalog.value.map(({ label, value }) => ({ label, value })))
+const cityOptions = computed(() => locationCatalog.value
+  .filter(province => province.value === cityProvince.value)
+  .flatMap(province => province.cities || []))
+const educationOptions = [
+  { label: '学历不限', value: '学历不限' },
+  { label: '初中及以下', value: '初中及以下' },
+  { label: '中专 / 中技', value: '中专' },
+  { label: '高中', value: '高中' },
+  { label: '大专', value: '大专' },
+  { label: '本科', value: '本科' },
+  { label: '硕士', value: '硕士' },
+  { label: '博士', value: '博士' }
+]
+const hasActiveFilters = computed(() => Boolean(selectedProvinces.value) || selectedLocations.value.length > 0 || selectedEducations.value.length > 0)
+
+function onProvinceChange(value) {
+  selectedProvinces.value = value || null
+  cityProvince.value = value || ''
+  selectedLocations.value = []
+}
+
+function onLocationChange(value) {
+  selectedLocations.value = value || []
+  if (selectedLocations.value.length) {
+    selectedProvinces.value = null
+  }
+}
 
 // 职位详情整页
 const detailJob = ref(null)
+const detailLoading = ref(false)
+const detailError = ref('')
 const detailAdapted = computed(() => detailJob.value ? huntStore.adaptedResumes[detailJob.value.id] : null)
 const adaptingDetail = ref(false)
 // 详情页统一以「适配结果」为准：搜索列表里的 matchLevel 可能是改阈值前的旧缓存，
@@ -841,12 +945,32 @@ const detailLevel = computed(() => detailAdapted.value?.matchLevel || detailJob.
 const detailNoChange = computed(() => detailAdapted.value?.noChange === true)
 
 async function onOpenJobDetail(job) {
-  detailJob.value = job
+  detailJob.value = { ...job }
+  detailError.value = ''
+  loadJobDetail(job)
   // 未登录：右侧简历区用蒙版锁定，不调用模拟接口；登录后由 watch 自动加载
   if (!auth.isLoggedIn) return
   // 没有简历：右侧显示"去创建简历"引导，不伪造适配简历
   if (!hasResume.value) return
   loadDetailResume(job)
+}
+
+async function loadJobDetail(job) {
+  if (!job?.id?.toString().startsWith('job_db_')) return
+  const requestedId = job.id
+  detailLoading.value = true
+  try {
+    const result = await jobHuntApi.getDetail(job.id)
+    if (detailJob.value?.id !== requestedId) return
+    detailJob.value = { ...detailJob.value, ...(result.job || {}) }
+    detailError.value = result.message || ''
+  } catch (e) {
+    if (detailJob.value?.id === requestedId) {
+      detailError.value = e.response?.data?.detail || '岗位详情暂时无法加载，请稍后重试'
+    }
+  } finally {
+    if (detailJob.value?.id === requestedId) detailLoading.value = false
+  }
 }
 
 // 静默加载该岗位的简历数据，保证右侧不为空
@@ -875,6 +999,8 @@ watch(() => auth.isLoggedIn, (now) => {
 
 function closeDetail() {
   detailJob.value = null
+  detailLoading.value = false
+  detailError.value = ''
 }
 
 // 跳转到首页「创建简历」入口（用户可自行选择对话生成或上传简历）
@@ -919,7 +1045,10 @@ async function onSearch() {
   try {
     const result = await jobHuntApi.search({
       keyword: searchKeyword.value,
-      targetJob: chatStore.targetJob
+      targetJob: chatStore.targetJob,
+      provinces: selectedProvinces.value ? [selectedProvinces.value] : [],
+      locations: selectedLocations.value,
+      educations: selectedEducations.value
     })
     huntStore.setMatchedJobs(result.jobs || [])
     searchMessage.value = result.message || (result.source === 'live_unavailable'
@@ -930,6 +1059,14 @@ async function onSearch() {
   } finally {
     huntStore.setSearchLoading(false)
   }
+}
+
+async function clearFilters() {
+  selectedProvinces.value = null
+  cityProvince.value = ''
+  selectedLocations.value = []
+  selectedEducations.value = []
+  if (auth.isLoggedIn) await onSearch()
 }
 
 function platformLabel(platform) {
@@ -1013,6 +1150,9 @@ function formatDate(iso) {
 }
 
 onMounted(() => {
+  jobHuntApi.getLocations().then(data => { locationCatalog.value = data.provinces || [] }).catch(() => {
+    showToast('全国省市目录加载失败，请刷新后重试', 'error')
+  })
   jobHuntApi.getCrawlerStatus().then(data => { crawlerStatuses.value = data.platforms || [] }).catch(() => {})
   // 没有简历时不加载演示投递记录，保持真实空态，
   // 避免"没简历却有 5 条投递记录"的矛盾
@@ -1027,6 +1167,18 @@ onMounted(() => {
 
 function crawlerStatusLabel(status) {
   return { success: '正常', running: '抓取中', empty: '无结果', failed: '失败', never: '未运行' }[status] || status
+}
+
+function crawlerJobCountLabel(item) {
+  return item.status === 'running' ? `上次 ${item.lastJobCount} 条` : `${item.lastJobCount} 条`
+}
+
+function crawlerStatusTooltip(item) {
+  if (item.status === 'running') return '正在获取最新职位，显示的条数来自最近一次已完成抓取'
+  if (item.status === 'failed') return '最近一次抓取失败，请检查该平台登录状态或稍后重试'
+  if (item.status === 'success') return `最近一次抓取成功，共获取 ${item.lastJobCount || 0} 条职位`
+  if (item.status === 'empty') return '最近一次抓取完成，但没有获取到职位'
+  return '该渠道尚未运行抓取任务'
 }
 </script>
 
@@ -1130,6 +1282,9 @@ function crawlerStatusLabel(status) {
   background: transparent;
   color: var(--color-text);
 }
+.search-input:focus-visible {
+  outline: none;
+}
 .search-input::placeholder {
   color: var(--color-text-muted);
   font-size: 1.1rem;
@@ -1154,6 +1309,53 @@ function crawlerStatusLabel(status) {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ============ 职位筛选 ============ */
+.job-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-xs);
+}
+.filter-title {
+  flex-shrink: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+.filter-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 0.92rem;
+}
+.filter-field > span { flex-shrink: 0; }
+.filter-select { width: 240px; }
+.filter-apply-btn,
+.filter-clear-btn {
+  flex-shrink: 0;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--radius-xs);
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+.filter-apply-btn {
+  background: var(--color-primary);
+  color: #fff;
+}
+.filter-apply-btn:hover:not(:disabled) { background: var(--color-primary-dark); }
+.filter-apply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.filter-clear-btn { color: var(--color-text-secondary); }
+.filter-clear-btn:hover { background: var(--color-bg-hover); color: var(--color-text); }
+:deep(.filter-select .n-base-selection) { border-radius: var(--radius-xs); }
 
 /* ============ 图例 ============ */
 .legend {
@@ -1184,6 +1386,22 @@ function crawlerStatusLabel(status) {
 .dot.green { background: #10B981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15); }
 .dot.yellow { background: #F59E0B; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15); }
 .dot.red { background: #EF4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15); }
+
+@media (max-width: 900px) {
+  .job-filters { flex-wrap: wrap; }
+  .filter-title { width: 100%; }
+  .filter-field { flex: 1 1 280px; }
+  .filter-select { width: 100%; }
+}
+
+@media (max-width: 640px) {
+  .tab-panel { padding: 20px 14px; }
+  .search-bar { flex-direction: column; }
+  .search-btn { width: 100%; }
+  .filter-field { flex-basis: 100%; }
+  .filter-apply-btn { flex: 1; }
+  .legend { gap: 10px 18px; flex-wrap: wrap; }
+}
 
 /* ============ 加载 & 空态 ============ */
 .loading-state {
@@ -1879,6 +2097,26 @@ function crawlerStatusLabel(status) {
   font-size: 1.05rem;
   color: var(--color-text-secondary);
   line-height: 1.8;
+  white-space: pre-wrap;
+}
+.detail-loading,
+.detail-empty {
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+.detail-loading .spinner { width: 28px; height: 28px; }
+.detail-empty a {
+  color: var(--color-primary);
+  font-weight: 600;
 }
 .detail-tags {
   display: flex;

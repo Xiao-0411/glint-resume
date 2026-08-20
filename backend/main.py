@@ -40,6 +40,49 @@ app = FastAPI(
     description="识光简历 —— 用 AI 识出你不曾察觉的闪光点，简历锻造与质量评估后端"
 )
 
+MAX_REQUEST_BYTES = 3 * 1024 * 1024
+
+
+class RequestBodyTooLarge(Exception):
+    pass
+
+
+class RequestBodyLimitMiddleware:
+    """Enforce a body limit even when Content-Length is absent or forged."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        raw_length = headers.get(b"content-length", b"")
+        if raw_length.isdigit() and int(raw_length) > self.max_bytes:
+            response = JSONResponse(status_code=413, content={"detail": "请求体不能超过 3MB"})
+            await response(scope, receive, send)
+            return
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise RequestBodyTooLarge()
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except RequestBodyTooLarge:
+            response = JSONResponse(status_code=413, content={"detail": "请求体不能超过 3MB"})
+            await response(scope, receive, send)
+
 # 启动时自动建表
 init_db()
 
@@ -51,6 +94,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BYTES)
 
 if settings.cors_origin_regex:
     logger.info("cors_local_any_port_enabled", extra={
@@ -89,8 +133,7 @@ async def security_headers(request: Request, call_next):
 
 
 # 双重限流: 用户 ID + 客户端 IP
-# 默认关闭(RATE_LIMIT_PER_MIN=0),本地 demo 完全不受影响;
-# 公网部署时设环境变量 RATE_LIMIT_PER_MIN=60 等即可启用。
+# 按用户 ID + IP 限制 API 写请求，默认每分钟 30 次；设为 0 可关闭。
 _rate_buckets: dict = defaultdict(deque)
 
 

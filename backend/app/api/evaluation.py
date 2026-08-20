@@ -30,7 +30,13 @@ async def evaluate_text(
     user_id = current_user.id
     req.target_job = sanitize_target_job(req.target_job)
     if req.session_id:
-        session_store.get_or_create(req.session_id, req.target_job, user_id)
+        try:
+            session_store.get_or_create(req.session_id, req.target_job, user_id)
+        except PermissionError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="该会话属于其他用户",
+            )
 
     if not settings.llm_available:
         resume = mock_resume(req.target_job)
@@ -108,7 +114,13 @@ async def evaluate_resume_endpoint(
     user_id = current_user.id
     req.target_job = sanitize_target_job(req.target_job)
     if req.session_id:
-        session_store.get_or_create(req.session_id, req.target_job, user_id)
+        try:
+            session_store.get_or_create(req.session_id, req.target_job, user_id)
+        except PermissionError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="该会话属于其他用户",
+            )
 
     if not settings.llm_available:
         quality_report = mock_quality_report()

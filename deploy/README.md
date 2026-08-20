@@ -1,4 +1,6 @@
-# sgjl.cloud 部署说明
+# sgjl.cloud 传统 Nginx 部署说明（备用）
+
+> 当前线上架构使用 Cloudflare Pages + Cloudflare Tunnel，请优先参考仓库根目录的 `运行指南.md`。本文件仅保留给自建 Linux/Nginx 部署使用。
 
 推荐部署结构：
 

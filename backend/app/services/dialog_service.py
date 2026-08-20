@@ -22,6 +22,42 @@ from app.store.db_store import session_store
 logger = logging.getLogger("glint.dialog")
 
 
+def _store_get(session_id: str, user_id: Optional[str] = None):
+    if user_id is None:
+        return session_store.get(session_id)
+    try:
+        return session_store.get(session_id, user_id)
+    except TypeError:
+        return session_store.get(session_id)
+
+
+def _store_append(session_id: str, role: str, content: str, user_id: Optional[str] = None):
+    if user_id is None:
+        return session_store.append_message(session_id, role, content)
+    try:
+        return session_store.append_message(session_id, role, content, user_id)
+    except TypeError:
+        return session_store.append_message(session_id, role, content)
+
+
+def _store_stage(session_id: str, stage: str, user_id: Optional[str] = None):
+    if user_id is None:
+        return session_store.set_stage(session_id, stage)
+    try:
+        return session_store.set_stage(session_id, stage, user_id)
+    except TypeError:
+        return session_store.set_stage(session_id, stage)
+
+
+def _store_extracted(session_id: str, info: Dict, user_id: Optional[str] = None):
+    if user_id is None:
+        return session_store.update_extracted(session_id, info)
+    try:
+        return session_store.update_extracted(session_id, info, user_id)
+    except TypeError:
+        return session_store.update_extracted(session_id, info)
+
+
 STAGE_ORDER = [
     "basic_info", "education",
     "experience_mining",
@@ -267,7 +303,7 @@ async def prepare_stage_info(
     last_assistant = _last_assistant_msg(session)
 
     # 记录用户消息
-    session_store.append_message(session_id, "user", user_message)
+    _store_append(session_id, "user", user_message, user_id)
 
     current_stage = session.get("stage", "basic_info")
     current_gaps = _stage_gaps(current_stage, session.get("extracted", {}))
@@ -300,7 +336,7 @@ async def prepare_stage_info(
             next_stage = _next_stage(current_stage) if advance else current_stage
             advanced = advance and next_stage != current_stage
 
-    session_store.set_stage(session_id, next_stage)
+    _store_stage(session_id, next_stage, user_id)
 
     stage_hint = STAGE_HINTS.get(next_stage, "")
 
@@ -344,7 +380,7 @@ async def prepare_stage_info(
     )
     # 重新读取:session 是 append_message 之前的快照,不含本轮用户消息。
     # 直接用旧快照会导致首轮 messages 为空,LLM 请求被网关拒绝。
-    session = session_store.get(session_id) or session
+    session = _store_get(session_id, user_id) or session
     return session, next_stage, system_prompt, quick_replies
 
 
@@ -383,7 +419,7 @@ async def chat_stream(
         return
 
     full_reply = "".join(full_reply_parts).strip()
-    session_store.append_message(session_id, "assistant", full_reply)
+    _store_append(session_id, "assistant", full_reply, user_id)
 
     # ⚠️ 增量提取:如果 AI 刚做完 recap(包含确认信号),尝试提取该阶段数据
     has_recap = any(s in full_reply for s in RECAP_SIGNALS)
@@ -393,10 +429,10 @@ async def chat_stream(
         "reply_len": len(full_reply),
     })
     if has_recap:
-        await _incremental_extract(session_id, next_stage, full_reply)
+        await _incremental_extract(session_id, next_stage, full_reply, user_id)
 
     # 把当前已增量抽取的结构化数据一并下发,供前端右侧"实时预览"渲染真实内容
-    extracted_snapshot = session_store.get(session_id)
+    extracted_snapshot = _store_get(session_id, user_id)
     extracted = extracted_snapshot.get("extracted", {}) if extracted_snapshot else {}
 
     yield (
@@ -410,9 +446,9 @@ async def chat_stream(
     )
 
 
-async def extract_profile(session_id: str) -> Dict:
+async def extract_profile(session_id: str, user_id: Optional[str] = None) -> Dict:
     """在生成简历前,基于完整对话历史抽取结构化 profile"""
-    session = session_store.get(session_id)
+    session = _store_get(session_id, user_id)
     if not session:
         logger.warning("extract_profile_session_not_found", extra={"session_id": session_id})
         return {}
@@ -484,7 +520,12 @@ def _merge_experiences(existing: List[Dict], incoming: List[Dict]) -> List[Dict]
     return merged
 
 
-async def _incremental_extract(session_id: str, stage: str, ai_recap: str):
+async def _incremental_extract(
+    session_id: str,
+    stage: str,
+    ai_recap: str,
+    user_id: Optional[str] = None,
+):
     """
     增量提取:根据当前阶段和 AI 的 recap,提取结构化数据存入 session
     """
@@ -503,7 +544,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
                 [{"role": "user", "content": prompt}], temperature=0.1, max_tokens=200,
                 model=settings.LLM_MODEL_FAST, timeout=settings.LLM_TIMEOUT_FAST_SECONDS)
             data = json.loads(_strip_code_fence(raw))
-            session_store.update_extracted(session_id, data)
+            _store_extracted(session_id, data, user_id)
             logger.info("incremental_extract_basic_info", extra={"data": data})
         except Exception as e:
             logger.warning("incremental_extract_basic_info_failed", extra={"error": str(e)})
@@ -520,14 +561,14 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
                 [{"role": "user", "content": prompt}], temperature=0.1, max_tokens=300,
                 model=settings.LLM_MODEL_FAST, timeout=settings.LLM_TIMEOUT_FAST_SECONDS)
             data = json.loads(_strip_code_fence(raw))
-            session_store.update_extracted(session_id, data)
+            _store_extracted(session_id, data, user_id)
             logger.info("incremental_extract_education", extra={"data": data})
         except Exception as e:
             logger.warning("incremental_extract_education_failed", extra={"error": str(e)})
 
     elif stage == "experience_mining":
         # 从最近几条消息中提取经历
-        session = session_store.get(session_id)
+        session = _store_get(session_id, user_id)
         recent = "\n".join([f"{m['role']}: {m['content']}" for m in session.get("messages", [])[-14:]])
         prompt = f"""从下面对话中,提取用户的项目/实习/比赛/社团经历,输出 JSON:
 对话: \"\"\"{recent}\"\"\"
@@ -548,7 +589,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
             # ⚠️ 多段经历分多轮 recap 时,合并而非覆盖,避免后一次提取丢掉之前已确认的经历
             existing = (session.get("extracted", {}) or {}).get("experiences", []) if session else []
             merged = _merge_experiences(existing, data.get("experiences", []))
-            session_store.update_extracted(session_id, {"experiences": merged})
+            _store_extracted(session_id, {"experiences": merged}, user_id)
             logger.info("incremental_extract_experience", extra={"merged_count": len(merged)})
         except Exception as e:
             logger.warning("incremental_extract_experience_failed", extra={"error": str(e)})
@@ -565,7 +606,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
                 [{"role": "user", "content": prompt}], temperature=0.1, max_tokens=200,
                 model=settings.LLM_MODEL_FAST, timeout=settings.LLM_TIMEOUT_FAST_SECONDS)
             data = json.loads(_strip_code_fence(raw))
-            session_store.update_extracted(session_id, data)
+            _store_extracted(session_id, data, user_id)
             logger.info("incremental_extract_awards", extra={"data": data})
         except Exception as e:
             logger.warning("incremental_extract_awards_failed", extra={"error": str(e)})
@@ -582,7 +623,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
                 [{"role": "user", "content": prompt}], temperature=0.1, max_tokens=300,
                 model=settings.LLM_MODEL_FAST, timeout=settings.LLM_TIMEOUT_FAST_SECONDS)
             data = json.loads(_strip_code_fence(raw))
-            session_store.update_extracted(session_id, data)
+            _store_extracted(session_id, data, user_id)
             logger.info("incremental_extract_skills", extra={"data": data})
         except Exception as e:
             logger.warning("incremental_extract_skills_failed", extra={"error": str(e)})

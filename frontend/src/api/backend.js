@@ -11,9 +11,7 @@ const DEFAULT_BASE_URL = import.meta.env.DEV
   : 'https://api.sgjl.cloud'
 // 不能用 ||：万一显式配了空串会被当假值吞掉,悄悄退回默认值,不易排查。
 const rawBaseUrl = import.meta.env.VITE_API_BASE_URL
-const BASE_URL = (rawBaseUrl === undefined || rawBaseUrl === '')
-  ? DEFAULT_BASE_URL
-  : rawBaseUrl
+const BASE_URL = rawBaseUrl === undefined ? DEFAULT_BASE_URL : rawBaseUrl
 
 const http = axios.create({
   baseURL: BASE_URL,
@@ -347,13 +345,27 @@ export function downloadResumePdf(resumeId) {
 export async function jobSearch(payload) {
   const { data } = await http.post('/api/jobs/search', {
     keyword: payload.keyword || '',
-    target_job: payload.targetJob || ''
-  })
+    target_job: payload.targetJob || '',
+    provinces: payload.provinces || [],
+    locations: payload.locations || [],
+    educations: payload.educations || []
+  }, { timeout: 240000 })
   return data
 }
 
 export async function getCrawlerStatus() {
   const { data } = await http.get('/api/jobs/crawler-status')
+  return data
+}
+
+export async function getJobLocations() {
+  const { data } = await http.get('/api/jobs/locations')
+  return data
+}
+
+export async function getJobDetail(jobId) {
+  const numericId = String(jobId || '').replace(/^job_db_/, '')
+  const { data } = await http.get(`/api/jobs/detail/${encodeURIComponent(numericId)}`, { timeout: 60000 })
   return data
 }
 
