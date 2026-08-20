@@ -85,9 +85,15 @@ async def job_locations():
 
 
 def _clean_title(value: str) -> str:
+    """去掉岗位名尾部粘连的薪资，以及【】角标。
+
+    角标常出现在开头（"【Python】后端开发工程师"），直接按【切分会得到空串，
+    因此改为移除角标本身而不是截断其后的内容。
+    """
     title = re.sub(r"\s+", " ", (value or "").strip())
-    title = re.split(r"【|\s+(?=\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[kK千万元])", title, maxsplit=1)[0]
-    return title[:100].strip(" -|·")
+    title = re.sub(r"【[^】]*】", " ", title)
+    title = re.split(r"\s+(?=\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[kK千万元])", title, maxsplit=1)[0]
+    return re.sub(r"\s+", " ", title)[:100].strip(" -|·")
 
 
 def _clean_location(value: str) -> str:
@@ -117,12 +123,13 @@ def _db_job_search(
 
     if keyword:
         kw = f"%{keyword}%"
+        # 岗位描述不再随列表抓取入库，按 description 搜索会漏掉绝大多数记录，
+        # 因此只在岗位名/公司/地点上匹配。
         query = query.filter(
             or_(
                 Job.title.like(kw),
                 Job.company.like(kw),
                 Job.location.like(kw),
-                Job.description.like(kw),
             )
         )
 
@@ -164,6 +171,9 @@ def _db_job_search(
             "requirements": row.requirements or [],
             "platform": row.platform,
             "url": row.url or "",
+            "category": row.category or "",
+            "jobLevel": row.job_level or "",
+            "industry": row.industry or "",
             "crawledAt": row.crawled_at.isoformat() if row.crawled_at else "",
         })
     return results
@@ -183,6 +193,9 @@ def _job_payload(row: Job, *, include_description: bool = True) -> dict:
         "requirements": row.requirements or [],
         "platform": row.platform,
         "url": row.url or "",
+        "category": row.category or "",
+        "jobLevel": row.job_level or "",
+        "industry": row.industry or "",
         "crawledAt": row.crawled_at.isoformat() if row.crawled_at else "",
     }
 
@@ -226,50 +239,81 @@ def _is_trusted_job_url(platform: str, url: str) -> bool:
     return parsed.scheme == "https" and bool(domain) and (hostname == domain or hostname.endswith(f".{domain}"))
 
 
-def _calc_match(target_job: str, job: dict) -> dict:
-    """计算岗位匹配度"""
-    t = (target_job or "").lower()
-    keywords = []
-    for k, v in KW_MAP.items():
-        if k.lower() in t:
-            keywords = v
-            break
-    if not keywords:
-        keywords = job["requirements"][:4] if job["requirements"] else []
+def _direction_score(target: str, title: str, synonyms: list[str]) -> tuple[int, str]:
+    """岗位名方向契合度：0-100 与一句说明。"""
+    title_lower, target_lower = title.lower(), target.lower()
+    if target_lower in title_lower or title_lower in target_lower:
+        return 100, f"岗位名与目标岗位「{target}」高度一致"
+    hits = [word for word in synonyms if word.lower() in title_lower]
+    if hits:
+        return 78, f"岗位方向与「{'、'.join(hits[:3])}」相关"
+    bigrams_target = {target_lower[i:i + 2] for i in range(len(target_lower) - 1)}
+    bigrams_title = {title_lower[i:i + 2] for i in range(len(title_lower) - 1)}
+    if bigrams_target & bigrams_title:
+        # 中文岗位名共享 2 字片段（如"产品经理"↔"产品运营"）视为部分相关。
+        return 60, "岗位方向部分相关"
+    return 20, "岗位方向与目标岗位差异较大"
 
-    requirements = job.get("requirements", [])
-    if not requirements:
+
+def _calc_match(target_job: str, job: dict) -> dict:
+    """计算岗位匹配度。
+
+    判据优先级：
+    1. 岗位有真实技能清单（来自 JD 抓取 + AI 提取）时，以「技能覆盖率」为主，
+       岗位名方向为辅，加权得分。技能是最能反映胜任要求的信号。
+    2. 技能清单缺失（JD 尚未补全）时退化为纯岗位名方向判断，并在理由中
+       说明依据有限，避免用一个看似精确的分数误导用户。
+
+    注意不要回到"命中数 ÷ requirements 长度"的老算法：requirements 是平台
+    原始技术栈，条目越详细分母越大，会让好岗位得分反而更低。
+    """
+    title = str(job.get("title") or "").strip()
+    target = (target_job or "").strip()
+    requirements = [str(item).strip() for item in (job.get("requirements") or []) if str(item).strip()]
+
+    if not title or not target:
         return {"score": 50, "matched_keywords": [], "level": "yellow", "missing": [], "reasons": "匹配度未知"}
 
-    match_count = 0
-    matched = []
-    for req in requirements:
-        for kw in keywords:
-            if kw.lower() in req.lower() or req.lower() in kw.lower():
-                match_count += 1
-                matched.append(kw)
-                break
+    synonyms = next((v for k, v in KW_MAP.items() if k.lower() in target_job.lower()), [])
+    direction, direction_reason = _direction_score(target, title, synonyms)
 
-    score = round((match_count / len(requirements)) * 100) if requirements else 50
-
-    if score >= 85:
-        level, reasons = "green", f"岗位要求「{'、'.join(matched[:3])}」与你的技能高度匹配"
+    if requirements and synonyms:
+        # 技能覆盖率：目标岗位的核心技能中，有多少被这个岗位要求命中。
+        hits = [
+            skill for skill in synonyms
+            if any(skill.lower() in req.lower() or req.lower() in skill.lower() for req in requirements)
+        ]
+        coverage = round(len(hits) / len(synonyms) * 100)
+        # 取"方向"与"技能加成后"的较高者。
+        #
+        # 不能简单用覆盖率加权：JD 写得简略（只列 3 个技能）不代表岗位不对口，
+        # 那样会让"Java开发工程师"这种完全对口的岗位因为技能少而被判成低匹配。
+        # 因此以方向分为基线，技能命中只做上浮，命中越多上浮越大。
+        skill_bonus = min(len(hits) * 8, 25) if hits else 0
+        score = max(direction, round(coverage * 0.7 + direction * 0.3)) + skill_bonus
+        score = min(score, 100)
+        matched = hits
+        missing = [skill for skill in synonyms if skill not in hits][:3]
+        if hits:
+            reasons = f"{direction_reason}；岗位要求覆盖你的「{'、'.join(hits[:3])}」等技能"
+        else:
+            reasons = f"{direction_reason}；岗位要求与你的核心技能重合较少"
+    else:
+        # JD 未补全：只能按方向判断，分数适度收敛避免过度自信。
+        score = round(direction * 0.85)
+        matched = []
         missing = []
-    elif score >= 60:
-        missing = [r for r in requirements if not any(
-            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
-        reasons = f"匹配度中等，建议微调简历突出「{'、'.join(matched)}」等技能"
-        missing = missing[:2]
+        reasons = f"{direction_reason}（岗位详情尚未补全，匹配度依据有限）"
+
+    if score >= 80:
+        level = "green"
+    elif score >= 55:
         level = "yellow"
     else:
-        missing = [r for r in requirements if not any(
-            mk.lower() in r.lower() or r.lower() in mk.lower() for mk in matched)]
-        reasons = f"核心技能「{'、'.join(missing[:3])}」暂不匹配，建议先补足再投递"
-        missing = missing[:3]
         level = "red"
 
     return {
-        "score": score,
+        "score": max(0, min(100, score)),
         "matched_keywords": matched,
         "level": level,
         "missing": missing,
@@ -360,54 +404,17 @@ async def job_detail(
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    """返回完整岗位详情；数据库只有摘要时按平台即时补抓并持久化。"""
+    """返回岗位基础信息。
+
+    岗位描述不再站内展示（前端只显示公司/地点/薪资/匹配度 + 原站链接），
+    因此这里不再触发平台实时抓取：那条链路要打开浏览器、等待 20 秒以上，
+    对一个不展示的字段并不值得。用户需要完整 JD 时点 url 去原站看。
+    """
     row = db.query(Job).filter(Job.id == job_id, Job.is_active == True).first()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="职位不存在或已失效")
 
-    if _has_full_detail(row):
-        return {"job": _job_payload(row), "detailSource": "cache"}
-
-    crawler = _crawler_for_platform(row.platform)
-    if crawler is None or not _is_trusted_job_url(row.platform, row.url or ""):
-        return {
-            "job": _job_payload(row, include_description=False),
-            "detailSource": "summary",
-            "message": "该招聘平台暂未提供可读取的完整岗位详情",
-        }
-
-    try:
-        detail = await asyncio.wait_for(
-            crawler.fetch_detail(_job_payload(row)),
-            timeout=settings.CRAWLER_DETAIL_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        detail = {}
-        message = "岗位详情加载超时，可查看招聘平台原始职位"
-    except Exception as exc:
-        detail = {}
-        logger.warning("job_detail_fetch_failed", extra={"job_id": row.id, "platform": row.platform, "error": str(exc)})
-        error_text = str(exc)
-        message = error_text if "登录状态已失效" in error_text else "岗位详情暂时无法读取，可查看招聘平台原始职位"
-    finally:
-        await crawler.close()
-
-    description = str(detail.get("description") or "").strip()
-    requirements = detail.get("requirements") if isinstance(detail.get("requirements"), list) else []
-    if description:
-        row.description = description
-        if requirements:
-            row.requirements = requirements
-        row.updated_at = datetime.datetime.now(datetime.timezone.utc)
-        db.commit()
-        db.refresh(row)
-        return {"job": _job_payload(row), "detailSource": "live"}
-
-    return {
-        "job": _job_payload(row, include_description=False),
-        "detailSource": "summary",
-        "message": message if "message" in locals() else "岗位详情暂时无法读取，可查看招聘平台原始职位",
-    }
+    return {"job": _job_payload(row, include_description=False), "detailSource": "summary"}
 
 
 @router.post("/jobs/adapt")

@@ -10,6 +10,8 @@ venv/
 .idea/
 .vscode/
 uploads/
+# 数据库导出的职位备份，体积大且含线上数据，不入库。
+backups/
 vendor/*
 !vendor/boss-zhipin-scraper/
 !vendor/boss-zhipin-scraper/**

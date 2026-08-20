@@ -162,6 +162,13 @@ class Job(Base):
     description = Column(Text, default="", comment="职位描述")
     requirements = Column(JSON, default=list, comment="职位要求（技能列表）")
     url = Column(String(512), default="", comment="原始链接")
+    category = Column(String(32), default="", index=True, comment="AI 分类的岗位大类")
+    job_level = Column(String(16), default="", comment="AI 判定的职级")
+    industry = Column(String(32), default="", comment="AI 判定的所属行业")
+    detail_status = Column(
+        String(16), default="pending", index=True,
+        comment="JD 补全状态: pending/done/failed/unsupported",
+    )
     is_active = Column(Boolean, default=True, index=True, comment="是否有效")
     crawled_at = Column(DateTime, default=_now, comment="抓取时间")
     created_at = Column(DateTime, default=_now)
@@ -181,4 +188,20 @@ class CrawlerStatus(Base):
     last_saved_count = Column(Integer, default=0)
     last_duration_ms = Column(Integer, default=0)
     last_error = Column(Text, default="")
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class CrawlCursor(Base):
+    """全量抓取的滚动游标。
+
+    373 个城市 × 全部关键词无法在一轮内跑完（实测猎聘约需 60 小时），
+    因此每轮只推进一个切片，靠游标持久化保证重启后接着上次的位置继续，
+    最终在若干轮内滚动覆盖全部组合。
+    """
+    __tablename__ = "crawl_cursor"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope = Column(String(32), nullable=False, unique=True, index=True, comment="游标维度: city/keyword")
+    position = Column(Integer, nullable=False, default=0, comment="下一轮的起始下标")
+    cycle = Column(Integer, nullable=False, default=0, comment="已完成的整轮数")
     updated_at = Column(DateTime, default=_now, onupdate=_now)

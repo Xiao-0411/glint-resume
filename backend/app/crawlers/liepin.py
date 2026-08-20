@@ -8,24 +8,32 @@ from typing import List, Optional
 from urllib.parse import quote
 
 from app.crawlers.base import BaseCrawler, select_cities, select_keywords
+from app.crawlers.card_parser import (
+    clean_title,
+    is_publishable,
+    parse_company,
+    parse_education,
+    parse_experience,
+    parse_salary,
+)
 from app.crawlers.cdp_browser import CdpBrowser, page_status, wait_for_cards, wait_for_detail_text
+from app.services.location_catalog import extract_location
+from app.core.logging_config import get_logger
 
+logger = get_logger("glint.crawler.liepin")
 
 SEARCH_URL = "https://www.liepin.com/zhaopin/?key={}"
-SELECTORS = ["a[href*='/job/']", "a[href*='/a/']", "a[class*='job-title']"]
+SELECTORS = [
+    "div[class*='job-list'] a[href*='/job/']",
+    "a[class*='job-title']",
+    "a[href*='/job/']",
+    "a[href*='/a/']",
+]
 DETAIL_SELECTORS = [
     ".job-intro-container", ".job-intro-content", ".job-description",
     "[class*='job-intro'] [class*='content']", "[class*='job-description']",
 ]
 DETAIL_MARKERS = ("岗位职责", "职位职责", "任职要求", "职位要求", "职位描述")
-
-
-def _first(text: str, patterns: list[str]) -> str:
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            return match.group(0).strip()
-    return ""
 
 
 class LiepinCrawler(BaseCrawler):
@@ -40,6 +48,7 @@ class LiepinCrawler(BaseCrawler):
         seen: set[str] = set()
         jobs: list[dict] = []
         had_cards = False
+        rejected = 0
         try:
             browser.connect()
             for city in cities:
@@ -51,11 +60,17 @@ class LiepinCrawler(BaseCrawler):
                     had_cards = True
                     for card in cards:
                         job = self._parse_card(card)
-                        if job and city in job["location"] and job["platform_job_id"] not in seen:
+                        if not job:
+                            continue
+                        if not is_publishable(job, city=city):
+                            rejected += 1
+                            continue
+                        if job["platform_job_id"] not in seen:
                             seen.add(job["platform_job_id"])
                             jobs.append(job)
             if not had_cards:
                 raise RuntimeError("猎聘页面未显示职位，可能未登录或被风控拦截")
+            logger.info("liepin_crawl_done", extra={"kept": len(jobs), "rejected": rejected})
             return jobs
         finally:
             browser.close()
@@ -86,36 +101,25 @@ class LiepinCrawler(BaseCrawler):
         href = str(card.get("href", ""))
         match = re.search(r"(?:/job/|/a/)([A-Za-z0-9_-]+)", href)
         job_id = match.group(1) if match else href
-        title = self._clean_title(str(card.get("title", "")))
+        title = clean_title(str(card.get("title", "")))
         text = str(card.get("text", ""))
         if not job_id or not title:
             return None
-        company = _first(text, [r"[^\s|·]{2,}(?:有限公司|集团|科技|公司|研究院)"])
-        if not company:
-            lines = [line for line in re.split(r"\s+", text) if line]
-            company = next((line for line in lines if line != title and len(line) >= 2), "未知公司")
-        salary = _first(text, [r"面议", r"\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[万千kK元]"])
-        location = _first(text, [r"(?:北京|上海|广州|深圳|杭州|南京|苏州|成都|武汉|西安|天津|重庆)(?:[-·][\u4e00-\u9fff]{2,8}(?:区|县|市))?"])
-        experience = _first(text, [r"经验不限", r"\d+[-~至]?\d*年", r"应届生"])
-        education = _first(text, [r"学历不限", r"大专|本科|硕士|博士|中专|高中"])
-        tags = [item for item in (experience, education) if item]
+        experience = parse_experience(text)
+        education = parse_education(text)
         return self.normalize_job({
             "job_id": job_id,
             "title": title,
-            "company": company,
-            "salary": salary,
-            "location": location,
+            "company": parse_company(text, title),
+            "salary": parse_salary(text),
+            "location": extract_location(text),
             "experience": experience,
             "education": education,
-            "tags": tags,
+            "tags": [item for item in (experience, education) if item],
             "description": "",
             "requirements": [],
             "url": href,
         })
-
-    @staticmethod
-    def _clean_title(title: str) -> str:
-        return re.split(r"【|\s+(?=\d+(?:\.\d+)?\s*[-~至]\s*\d+)", re.sub(r"\s+", " ", title.strip()), maxsplit=1)[0][:100].strip()
 
     @staticmethod
     def _extract_requirements(text: str) -> list[str]:

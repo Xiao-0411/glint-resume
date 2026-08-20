@@ -1,6 +1,7 @@
 """全国省市级职位筛选目录，数据来自项目内 BOSS 城市码表。"""
 from functools import lru_cache
 import json
+import re
 from pathlib import Path
 
 
@@ -83,3 +84,52 @@ def cities_for_provinces(provinces: list[str]) -> list[str]:
         if province["value"] in selected
         for city in province["cities"]
     ]
+
+
+@lru_cache(maxsize=1)
+def all_city_names() -> tuple[str, ...]:
+    """全部城市名，按长度降序，供最长优先匹配使用。"""
+    names = {city["value"] for province in location_catalog() for city in province["cities"]}
+    return tuple(sorted(names, key=len, reverse=True))
+
+
+@lru_cache(maxsize=1)
+def _city_pattern() -> re.Pattern:
+    """匹配任一城市名，可选带一级行政区后缀。
+
+    城市名按长度降序进入分支，保证"齐齐哈尔"不会被"齐齐"之类的短名抢先匹配。
+    """
+    cities = "|".join(re.escape(name) for name in all_city_names())
+    return re.compile(rf"(?:{cities})(?:[-·\s]?[一-鿿]{{2,8}}?(?:区|县|市|新区|开发区))?")
+
+
+def extract_location(text: str) -> str:
+    """从卡片文本中提取"城市"或"城市-行政区"。"""
+    if not text:
+        return ""
+    match = _city_pattern().search(text)
+    return match.group(0).strip() if match else ""
+
+
+def city_of(location: str) -> str:
+    """取出地点串所属的城市名；无法识别时返回空串。"""
+    if not location:
+        return ""
+    for name in all_city_names():
+        if name in location:
+            return name
+    return ""
+
+
+def matches_city(location: str, city: str) -> bool:
+    """判断地点是否属于目标城市。
+
+    直辖市与省名同名的情况（如"上海"）以及"上海·浦东新区"这类带区串都能命中。
+    """
+    city = (city or "").strip()
+    if not city:
+        return True
+    if not location:
+        return False
+    normalized_city = city.removesuffix("市") or city
+    return normalized_city in location or city in location

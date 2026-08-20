@@ -2,7 +2,8 @@
 职位爬虫基类 —— 定义公共接口和工具方法
 """
 import asyncio
-import logging
+
+from app.core.logging_config import get_logger
 import os
 import random
 from abc import ABC, abstractmethod
@@ -10,7 +11,7 @@ from typing import List, Optional
 
 import httpx
 
-logger = logging.getLogger("glint.crawler")
+logger = get_logger("glint.crawler")
 
 # 常用 User-Agent 池
 USER_AGENTS = [
@@ -21,7 +22,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 ]
 
-# 岗位关键词（全量抓取覆盖各方向）
+# 兜底岗位词。正常情况下抓取维度来自 app.services.job_catalog 的职位分类树
+# （官方类目树或内置基线表），这里只在分类目录完全不可用时使用。
 JOB_KEYWORDS = [
     "产品经理", "Java开发", "前端开发", "后端开发", "数据分析",
     "测试工程师", "运营", "Python开发", "C++开发", "算法工程师",
@@ -33,37 +35,102 @@ JOB_KEYWORDS = [
 
 DEFAULT_CRAWLER_CITIES = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "西安"]
 
+# 招聘供给高度集中的城市，排在全量池最前面，
+# 保证冷启动阶段用户最可能搜索的城市先有数据。
+PRIORITY_CITIES = [
+    "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "西安",
+    "南京", "苏州", "天津", "重庆", "长沙", "郑州", "青岛", "宁波",
+    "合肥", "东莞", "佛山", "厦门", "福州", "济南", "无锡", "大连",
+]
+
+
+def all_job_categories() -> List[str]:
+    """全量抓取的岗位维度：平台职位分类树。
+
+    优先用官方类目树，缺失时回落到内置基线表；两者都不可用才用
+    JOB_KEYWORDS 兜底。可用 CRAWLER_KEYWORDS 显式覆盖（逗号分隔）。
+    """
+    raw = os.getenv("CRAWLER_KEYWORDS", "").strip()
+    if raw:
+        selected = [item.strip() for item in raw.split(",") if item.strip()]
+        if selected:
+            return selected
+
+    try:
+        from app.services.job_catalog import category_names
+
+        names = category_names()
+        if names:
+            return names
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("job_catalog_unavailable", extra={"error": str(exc)})
+    return JOB_KEYWORDS
+
 
 def select_keywords(keywords: List[str] = None) -> List[str]:
-    """Bound scheduled crawl volume while keeping explicit live searches intact."""
+    """选择本轮抓取的岗位类别。
+
+    显式传入（用户实时搜索）时原样返回。定时抓取时岗位类别跟随城市游标推进：
+    只有当城市列表走完一整圈，岗位类别才前进一格，从而覆盖
+    全部「城市 × 岗位类别」组合。
+    """
     if keywords is not None:
         return keywords
+
+    pool = all_job_categories()
     raw_limit = os.getenv("CRAWLER_MAX_KEYWORDS", "5")
     try:
         limit = int(raw_limit)
     except ValueError as exc:
         raise RuntimeError("CRAWLER_MAX_KEYWORDS 必须是整数") from exc
-    if not 1 <= limit <= len(JOB_KEYWORDS):
-        raise RuntimeError(f"CRAWLER_MAX_KEYWORDS 必须在 1 到 {len(JOB_KEYWORDS)} 之间")
-    return JOB_KEYWORDS[:limit]
+    if not 1 <= limit <= len(pool):
+        raise RuntimeError(f"CRAWLER_MAX_KEYWORDS 必须在 1 到 {len(pool)} 之间")
+
+    from app.crawlers.cursor import city_cycles, slice_at
+
+    # 用城市已完成的圈数决定岗位类别偏移，类别游标本身不独立推进。
+    offset = city_cycles() * limit
+    return slice_at(pool, offset, limit)
+
+
+def all_crawl_cities() -> List[str]:
+    """全量抓取的城市池：默认取 373 城市表，可用 CRAWLER_CITIES 覆盖。
+
+    热门城市排在最前，其余按字典序，使同省城市相邻、进度易于观察。
+    """
+    raw = os.getenv("CRAWLER_CITIES", "").strip()
+    if raw:
+        selected = [city.strip() for city in raw.split(",") if city.strip()]
+        if selected:
+            return selected
+
+    from app.services.location_catalog import all_city_names
+
+    catalog = set(all_city_names())
+    head = [city for city in PRIORITY_CITIES if city in catalog]
+    tail = sorted(catalog - set(head))
+    return head + tail
 
 
 def select_cities(cities: List[str] = None) -> List[str]:
-    """选择抓取城市；显式传入的城市用于用户搜索，否则使用轮询配置。"""
+    """选择本轮抓取的城市。
+
+    显式传入（用户实时搜索）时原样返回；定时抓取则从持久化游标取下一个切片。
+    """
     if cities is not None:
         return [city.strip() for city in cities if city and city.strip()]
 
-    raw = os.getenv("CRAWLER_CITIES", ",".join(DEFAULT_CRAWLER_CITIES))
-    selected = [city.strip() for city in raw.split(",") if city.strip()]
-    if not selected:
-        selected = DEFAULT_CRAWLER_CITIES[:]
+    pool = all_crawl_cities()
     try:
-        limit = int(os.getenv("CRAWLER_MAX_CITIES", str(min(4, len(selected)))))
+        limit = int(os.getenv("CRAWLER_MAX_CITIES", "4"))
     except ValueError as exc:
         raise RuntimeError("CRAWLER_MAX_CITIES 必须是整数") from exc
-    if not 1 <= limit <= len(selected):
-        raise RuntimeError(f"CRAWLER_MAX_CITIES 必须在 1 到 {len(selected)} 之间")
-    return selected[:limit]
+    if not 1 <= limit <= len(pool):
+        raise RuntimeError(f"CRAWLER_MAX_CITIES 必须在 1 到 {len(pool)} 之间")
+
+    from app.crawlers.cursor import next_slice
+
+    return next_slice("city", pool, limit)
 
 
 class BaseCrawler(ABC):

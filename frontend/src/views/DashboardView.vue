@@ -146,7 +146,6 @@
             v-for="job in huntStore.matchedJobs"
             :key="job.id"
             :class="['job-card', 'match-' + job.matchLevel]"
-            @click="onOpenJobDetail(job)"
           >
             <div class="job-body">
               <!-- 顶部：标题 + 匹配标签 + 薪资 -->
@@ -157,6 +156,7 @@
                     <span class="job-company">{{ job.company }}</span>
                     <span class="job-sep">·</span>
                     <span class="job-location">{{ job.location }}</span>
+                    <span v-if="job.category" class="job-category">{{ job.category }}</span>
                     <span v-if="job.education && !job.tags?.includes(job.education)" class="job-tag">{{ job.education }}</span>
                     <span v-for="tag in job.tags" :key="tag" class="job-tag">{{ tag }}</span>
                     <span v-if="job.platform" class="job-source">{{ platformLabel(job.platform) }}</span>
@@ -172,14 +172,25 @@
                 </div>
               </div>
 
-              <p v-if="job.description" class="job-desc">{{ job.description }}</p>
               <div v-if="job.crawledAt || job.url" class="job-freshness">
                 <span v-if="job.crawledAt">抓取于 {{ formatDateTime(job.crawledAt) }}</span>
-                <a v-if="job.url" :href="job.url" target="_blank" rel="noopener noreferrer" @click.stop>查看原始职位</a>
+                <a
+                  v-if="job.url"
+                  class="job-origin-link"
+                  :href="job.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  @click.stop
+                >
+                  查看原始职位
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                  </svg>
+                </a>
               </div>
 
               <!-- 匹配理由 -->
-              <div class="match-reason">
+              <div v-if="job.reasons" class="match-reason">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
                 </svg>
@@ -187,7 +198,7 @@
               </div>
 
               <!-- 缺失技能 -->
-              <div v-if="job.missingSkills.length > 0" class="missing-skills">
+              <div v-if="job.missingSkills?.length > 0" class="missing-skills">
                 <span class="missing-label">待补足技能</span>
                 <span v-for="sk in job.missingSkills" :key="sk" class="missing-tag">{{ sk }}</span>
               </div>
@@ -659,48 +670,30 @@
 
       <!-- 左右分栏 -->
       <div class="detail-body">
-        <!-- 左侧：职位详情 -->
+        <!-- 左侧：匹配分析与操作（岗位描述不再站内展示，改为跳转原站） -->
         <div class="detail-left">
-          <div class="detail-section">
-            <h4 class="detail-section-title">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-              职位描述
-            </h4>
-            <div v-if="detailLoading" class="detail-loading">
-              <div class="spinner"></div>
-              <span>正在从招聘平台获取完整岗位详情...</span>
-            </div>
-            <div v-else-if="detailError" class="detail-empty">
-              <p>{{ detailError }}</p>
-              <a v-if="detailJob.url" :href="detailJob.url" target="_blank" rel="noopener noreferrer">查看招聘平台原始职位</a>
-            </div>
-            <p v-else-if="detailJob.description" class="detail-desc">{{ detailJob.description }}</p>
-            <div v-else class="detail-empty">
-              <p>该职位暂未提供完整岗位描述</p>
-              <a v-if="detailJob.url" :href="detailJob.url" target="_blank" rel="noopener noreferrer">查看招聘平台原始职位</a>
-            </div>
-          </div>
-
-          <div v-if="detailJob.requirements?.length" class="detail-section">
-            <h4 class="detail-section-title">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-              能力要求
-            </h4>
-            <div class="detail-tags">
-              <span v-for="req in detailJob.requirements" :key="req" class="detail-tag">{{ req }}</span>
-            </div>
-          </div>
-
           <div class="detail-section">
             <h4 class="detail-section-title">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
               匹配分析
             </h4>
             <div class="detail-reason">{{ detailJob.reasons }}</div>
-            <div v-if="detailJob.missingSkills.length > 0" class="detail-missing">
+            <div v-if="detailJob.missingSkills?.length > 0" class="detail-missing">
               <span class="detail-missing-label">待补足技能：</span>
               <span v-for="sk in detailJob.missingSkills" :key="sk" class="missing-tag">{{ sk }}</span>
             </div>
+            <a
+              v-if="detailJob.url"
+              class="detail-origin-link"
+              :href="detailJob.url"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              前往招聘平台查看完整岗位要求
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+            </a>
           </div>
 
           <!-- 操作按钮 -->
@@ -934,8 +927,6 @@ function onLocationChange(value) {
 
 // 职位详情整页
 const detailJob = ref(null)
-const detailLoading = ref(false)
-const detailError = ref('')
 const detailAdapted = computed(() => detailJob.value ? huntStore.adaptedResumes[detailJob.value.id] : null)
 const adaptingDetail = ref(false)
 // 详情页统一以「适配结果」为准：搜索列表里的 matchLevel 可能是改阈值前的旧缓存，
@@ -945,32 +936,14 @@ const detailLevel = computed(() => detailAdapted.value?.matchLevel || detailJob.
 const detailNoChange = computed(() => detailAdapted.value?.noChange === true)
 
 async function onOpenJobDetail(job) {
+  // 岗位描述不再站内展示，因此不再按需触发平台实时抓取；
+  // 详情页只承载匹配分析与简历适配。
   detailJob.value = { ...job }
-  detailError.value = ''
-  loadJobDetail(job)
   // 未登录：右侧简历区用蒙版锁定，不调用模拟接口；登录后由 watch 自动加载
   if (!auth.isLoggedIn) return
   // 没有简历：右侧显示"去创建简历"引导，不伪造适配简历
   if (!hasResume.value) return
   loadDetailResume(job)
-}
-
-async function loadJobDetail(job) {
-  if (!job?.id?.toString().startsWith('job_db_')) return
-  const requestedId = job.id
-  detailLoading.value = true
-  try {
-    const result = await jobHuntApi.getDetail(job.id)
-    if (detailJob.value?.id !== requestedId) return
-    detailJob.value = { ...detailJob.value, ...(result.job || {}) }
-    detailError.value = result.message || ''
-  } catch (e) {
-    if (detailJob.value?.id === requestedId) {
-      detailError.value = e.response?.data?.detail || '岗位详情暂时无法加载，请稍后重试'
-    }
-  } finally {
-    if (detailJob.value?.id === requestedId) detailLoading.value = false
-  }
 }
 
 // 静默加载该岗位的简历数据，保证右侧不为空
@@ -999,8 +972,6 @@ watch(() => auth.isLoggedIn, (now) => {
 
 function closeDetail() {
   detailJob.value = null
-  detailLoading.value = false
-  detailError.value = ''
 }
 
 // 跳转到首页「创建简历」入口（用户可自行选择对话生成或上传简历）
@@ -1478,6 +1449,15 @@ function crawlerStatusTooltip(item) {
   border-radius: var(--radius-xs);
   font-weight: 500;
 }
+/* AI 归类的岗位大类，用主色区分于平台原始标签 */
+.job-category {
+  font-size: 0.85rem;
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  padding: 3px 10px;
+  border-radius: var(--radius-xs);
+  font-weight: 600;
+}
 .job-source {
   font-size: 0.82rem;
   color: var(--color-primary);
@@ -1487,13 +1467,26 @@ function crawlerStatusTooltip(item) {
 }
 .job-freshness {
   display: flex;
+  align-items: center;
   gap: 14px;
   margin: -4px 0 14px;
   font-size: 0.86rem;
   color: var(--color-text-faint);
 }
-.job-freshness a { color: var(--color-primary); text-decoration: none; }
-.job-freshness a:hover { text-decoration: underline; }
+.job-origin-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-xs);
+  color: var(--color-primary);
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+}
+.job-origin-link:hover { background: var(--color-primary); color: #fff; }
+.job-origin-link svg { flex-shrink: 0; }
 .job-top-right { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex-shrink: 0; }
 .job-salary { font-size: 1.3rem; font-weight: 800; color: #EF4444; }
 
@@ -1513,13 +1506,6 @@ function crawlerStatusTooltip(item) {
   width: 8px; height: 8px;
   border-radius: 50%;
   background: currentColor;
-}
-
-.job-desc {
-  font-size: 1.05rem;
-  color: var(--color-text-secondary);
-  line-height: 1.7;
-  margin-bottom: 16px;
 }
 
 .match-reason {
@@ -2093,31 +2079,22 @@ function crawlerStatusTooltip(item) {
   margin-bottom: 12px;
   letter-spacing: -0.1px;
 }
-.detail-desc {
-  font-size: 1.05rem;
-  color: var(--color-text-secondary);
-  line-height: 1.8;
-  white-space: pre-wrap;
-}
-.detail-loading,
-.detail-empty {
-  min-height: 140px;
-  display: flex;
-  flex-direction: column;
+.detail-origin-link {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 24px;
-  border: 1px dashed var(--color-border);
+  gap: 6px;
+  margin-top: 16px;
+  padding: 9px 16px;
+  border: 1px solid var(--color-primary);
   border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
-  text-align: center;
-}
-.detail-loading .spinner { width: 28px; height: 28px; }
-.detail-empty a {
   color: var(--color-primary);
+  font-size: 0.95rem;
   font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
 }
+.detail-origin-link:hover { background: var(--color-primary); color: #fff; }
+.detail-origin-link svg { flex-shrink: 0; }
 .detail-tags {
   display: flex;
   flex-wrap: wrap;
