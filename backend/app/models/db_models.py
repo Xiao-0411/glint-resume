@@ -182,3 +182,19 @@ class CrawlerStatus(Base):
     last_duration_ms = Column(Integer, default=0)
     last_error = Column(Text, default="")
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class CrawlCursor(Base):
+    """全量抓取的滚动游标。
+
+    373 个城市 × 全部关键词无法在一轮内跑完（实测猎聘约需 60 小时），
+    因此每轮只推进一个切片，靠游标持久化保证重启后接着上次的位置继续，
+    最终在若干轮内滚动覆盖全部组合。
+    """
+    __tablename__ = "crawl_cursor"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope = Column(String(32), nullable=False, unique=True, index=True, comment="游标维度: city/keyword")
+    position = Column(Integer, nullable=False, default=0, comment="下一轮的起始下标")
+    cycle = Column(Integer, nullable=False, default=0, comment="已完成的整轮数")
+    updated_at = Column(DateTime, default=_now, onupdate=_now)

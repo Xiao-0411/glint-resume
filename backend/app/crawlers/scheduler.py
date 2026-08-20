@@ -1,26 +1,28 @@
-"""
-职位爬虫调度器 —— 每 2 小时自动运行一次
-可作为独立脚本运行，也可集成到 FastAPI 启动时
-"""
+"""职位爬虫调度器，运行间隔由环境变量按秒配置。"""
 import asyncio
 import datetime
-import logging
 import time
 from typing import List
 
-from sqlalchemy import and_
-
 from app.core.database import SessionLocal, init_db
+from app.core.config import settings
 from app.models.db_models import Job, CrawlerStatus
-from app.crawlers.zhipin import ZhipinCrawler
+from app.crawlers.cursor import cursor_snapshot
 from app.crawlers.zhaopin import ZhaopinCrawler
 from app.crawlers.liepin import LiepinCrawler
-from app.crawlers.browser_session import BrowserSessionCollector
+from app.crawlers.external_boss import ExternalBossCrawler
+from app.core.logging_config import get_logger
 
-logger = logging.getLogger("glint.scheduler")
+logger = get_logger("glint.scheduler")
 
-CRAWL_INTERVAL_SECONDS = 2 * 60 * 60  # 2 小时
+if not 1 <= settings.CRAWLER_INTERVAL_SECONDS <= 24 * 60 * 60:
+    raise RuntimeError("CRAWLER_INTERVAL_SECONDS 必须在 1 到 86400 之间")
+CRAWL_INTERVAL_SECONDS = settings.CRAWLER_INTERVAL_SECONDS
+# 单轮耗时经常超过配置间隔（实测猎聘一轮约 6 分钟）。此时仍强制静默一小段，
+# 否则调度器会不间断地连续请求，显著抬高触发风控的概率。
+MIN_IDLE_SECONDS = 30
 JOB_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_crawl_lock = asyncio.Lock()
 
 
 def _expire_and_cleanup() -> dict:
@@ -29,7 +31,7 @@ def _expire_and_cleanup() -> dict:
     try:
         now = datetime.datetime.now(datetime.timezone.utc)
         cutoff = now - datetime.timedelta(seconds=JOB_RETENTION_SECONDS)
-        expired = db.query(Job).filter(Job.created_at < cutoff, Job.is_active == True).update(
+        expired = db.query(Job).filter(Job.crawled_at < cutoff, Job.is_active == True).update(
             {Job.is_active: False}, synchronize_session=False
         )
         removed = db.query(Job).filter(Job.is_active == False).delete(synchronize_session=False)
@@ -48,21 +50,24 @@ def _save_jobs(jobs: List[dict]) -> int:
     if not jobs:
         return 0
 
+    deduped = {}
+    for job in jobs:
+        key = (job.get("platform", ""), job.get("platform_job_id", ""))
+        if key[0] and key[1]:
+            deduped[key] = job
+    if not deduped:
+        return 0
+
     db = SessionLocal()
     saved = 0
     try:
         now = datetime.datetime.now(datetime.timezone.utc)
-        for j in jobs:
-            existing = (
-                db.query(Job)
-                .filter(
-                    and_(
-                        Job.platform == j["platform"],
-                        Job.platform_job_id == j["platform_job_id"],
-                    )
-                )
-                .first()
-            )
+        platforms = {platform for platform, _ in deduped}
+        ids = {job_id for _, job_id in deduped}
+        existing_rows = db.query(Job).filter(Job.platform.in_(platforms), Job.platform_job_id.in_(ids)).all()
+        existing_map = {(row.platform, row.platform_job_id): row for row in existing_rows}
+        for key, j in deduped.items():
+            existing = existing_map.get(key)
             if existing:
                 # 更新已有记录
                 existing.title = j["title"]
@@ -72,8 +77,10 @@ def _save_jobs(jobs: List[dict]) -> int:
                 existing.experience = j["experience"]
                 existing.education = j["education"]
                 existing.tags = j["tags"]
-                existing.description = j["description"]
-                existing.requirements = j["requirements"]
+                if j["description"]:
+                    existing.description = j["description"]
+                if j["requirements"]:
+                    existing.requirements = j["requirements"]
                 existing.url = j["url"]
                 existing.is_active = True
                 existing.crawled_at = now
@@ -103,6 +110,7 @@ def _save_jobs(jobs: List[dict]) -> int:
     except Exception as e:
         db.rollback()
         logger.error("jobs_save_failed", extra={"error": str(e)})
+        raise
     finally:
         db.close()
     return saved
@@ -126,152 +134,131 @@ def _update_status(platform: str, **fields) -> None:
         db.close()
 
 
-async def _crawl_all() -> dict:
-    """运行全部平台爬虫"""
-    results = {}
-    crawlers = [
-        ("zhipin", ZhipinCrawler()),
+def _new_crawlers():
+    return [
+        ("zhipin", ExternalBossCrawler()),
         ("zhaopin", ZhaopinCrawler()),
         ("liepin", LiepinCrawler()),
     ]
 
-    for name, crawler in crawlers:
-        started = datetime.datetime.now(datetime.timezone.utc)
-        started_monotonic = time.monotonic()
-        _update_status(name, status="running", last_started_at=started, last_error="")
-        try:
-            logger.info("crawler_start", extra={"platform": name})
-            jobs = await crawler.crawl()
-            results[name] = len(jobs)
-            saved = _save_jobs(jobs)
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            status_fields = {
-                "status": "success" if jobs else "empty",
-                "last_finished_at": finished,
-                "last_job_count": len(jobs),
-                "last_saved_count": saved,
-                "last_duration_ms": round((time.monotonic() - started_monotonic) * 1000),
-                "last_error": "" if jobs else "平台返回 0 条职位",
-            }
-            if jobs:
-                status_fields["last_success_at"] = finished
-            _update_status(name, **status_fields)
-            logger.info("crawler_done", extra={"platform": name, "count": len(jobs)})
-        except Exception as exc:
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            _update_status(
-                name,
-                status="failed",
-                last_finished_at=finished,
-                last_job_count=0,
-                last_saved_count=0,
-                last_duration_ms=round((time.monotonic() - started_monotonic) * 1000),
-                last_error=str(exc)[:1000],
-            )
-            logger.error("crawler_failed", extra={"platform": name, "error": str(exc)})
-            results[name] = 0
-        finally:
-            await crawler.close()
 
-    return results
+async def _crawl_platform(
+    name: str,
+    crawler,
+    keywords: List[str] = None,
+    cities: List[str] = None,
+) -> tuple[str, int]:
+    """抓取一个平台并记录运行状态。"""
+    started = datetime.datetime.now(datetime.timezone.utc)
+    started_monotonic = time.monotonic()
+    _update_status(name, status="running", last_started_at=started, last_error="")
+    try:
+        logger.info("crawler_start", extra={"platform": name})
+        jobs = await crawler.crawl(keywords=keywords, cities=cities)
+        saved = _save_jobs(jobs)
+        finished = datetime.datetime.now(datetime.timezone.utc)
+        status_fields = {
+            "status": "success" if jobs else "empty",
+            "last_finished_at": finished,
+            "last_job_count": len(jobs),
+            "last_saved_count": saved,
+            "last_duration_ms": round((time.monotonic() - started_monotonic) * 1000),
+            "last_error": "" if jobs else "平台返回 0 条职位",
+        }
+        if jobs:
+            status_fields["last_success_at"] = finished
+        _update_status(name, **status_fields)
+        logger.info("crawler_done", extra={"platform": name, "count": len(jobs)})
+        return name, len(jobs)
+    except Exception as exc:
+        finished = datetime.datetime.now(datetime.timezone.utc)
+        _update_status(
+            name,
+            status="failed",
+            last_finished_at=finished,
+            last_job_count=0,
+            last_saved_count=0,
+            last_duration_ms=round((time.monotonic() - started_monotonic) * 1000),
+            last_error=str(exc)[:1000],
+        )
+        logger.error("crawler_failed", extra={"platform": name, "error": str(exc)})
+        return name, 0
+    finally:
+        await crawler.close()
 
 
-async def crawl_keyword(keyword: str) -> dict:
+async def _crawl_platforms(keywords: List[str] = None, cities: List[str] = None) -> dict:
+    pairs = await asyncio.gather(*(
+        _crawl_platform(name, crawler, keywords=keywords, cities=cities)
+        for name, crawler in _new_crawlers()
+    ))
+    return dict(pairs)
+
+
+async def _crawl_all() -> dict:
+    """并发运行全部平台爬虫。"""
+    return await _crawl_platforms()
+
+
+async def crawl_keyword(keyword: str, cities: List[str] = None) -> dict:
     """按用户当前搜索词抓取一次，供职位搜索接口在库为空时使用。"""
     keyword = (keyword or "").strip()
     if not keyword:
         return {"zhipin": 0, "zhaopin": 0, "liepin": 0}
-
-    results = {}
-    crawlers = [
-        ("zhipin", ZhipinCrawler()),
-        ("zhaopin", ZhaopinCrawler()),
-        ("liepin", LiepinCrawler()),
-    ]
-    for name, crawler in crawlers:
-        started = datetime.datetime.now(datetime.timezone.utc)
-        started_monotonic = time.monotonic()
-        _update_status(name, status="running", last_started_at=started, last_error="")
-        try:
-            jobs = await crawler.crawl(keywords=[keyword])
-            results[name] = len(jobs)
-            saved = _save_jobs(jobs)
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            status_fields = {
-                "status": "success" if jobs else "empty", "last_finished_at": finished,
-                "last_job_count": len(jobs), "last_saved_count": saved,
-                "last_duration_ms": round((time.monotonic() - started_monotonic) * 1000),
-                "last_error": "" if jobs else "平台返回 0 条职位",
-            }
-            if jobs:
-                status_fields["last_success_at"] = finished
-            _update_status(name, **status_fields)
-        except Exception as exc:
-            finished = datetime.datetime.now(datetime.timezone.utc)
-            _update_status(name, status="failed", last_finished_at=finished, last_job_count=0,
-                           last_saved_count=0, last_duration_ms=round((time.monotonic() - started_monotonic) * 1000),
-                           last_error=str(exc)[:1000])
-            logger.warning("crawler_keyword_failed", extra={"platform": name, "keyword": keyword, "error": str(exc)})
-            results[name] = 0
-        finally:
-            await crawler.close()
-    return results
+    async with _crawl_lock:
+        return await _crawl_platforms(keywords=[keyword], cities=cities)
 
 
 async def _run_once():
-    """执行一次全量抓取"""
+    """执行一次全量抓取。"""
     logger.info("crawl_cycle_start")
-    start = time.time()
-    results = await _crawl_all()
-    cleanup = _expire_and_cleanup()
-    elapsed = time.time() - start
-    total = sum(results.values())
+    start = time.monotonic()
+    async with _crawl_lock:
+        results = await _crawl_all()
+        cleanup = _expire_and_cleanup()
     logger.info(
         "crawl_cycle_done",
-        extra={"results": results, "total": total, "cleanup": cleanup, "elapsed_seconds": round(elapsed, 1)},
+        extra={
+            "results": results,
+            "total": sum(results.values()),
+            "cleanup": cleanup,
+            "elapsed_seconds": round(time.monotonic() - start, 1),
+        },
     )
     return results
 
 
 async def run_scheduler():
-    """启动定时调度器：每 2 小时执行一次"""
+    """启动定时调度器。
+
+    全量覆盖靠游标滚动完成，而不是靠单轮抓完：每轮只处理一个
+    「城市切片 × 关键词切片」，跑完立刻进入下一轮。因此间隔只是两轮之间的
+    喘息时间，真实周期由单轮耗时决定；若上一轮已超过间隔，则至少静默
+    MIN_IDLE_SECONDS 再继续，避免连续冲击目标站点触发风控。
+    """
     init_db()
-    browser_collector = BrowserSessionCollector()
-    try:
-        await browser_collector.start_and_wait_for_login()
-        logger.info("scheduler_started", extra={"interval_hours": CRAWL_INTERVAL_SECONDS / 3600})
-
-        while True:
-            try:
-                # 浏览器以正常用户方式打开三个平台，读取页面可见职位。
-                results = {}
-                started = time.monotonic()
-                captured = await browser_collector.crawl_all(JOB_KEYWORDS)
-                for platform, jobs in captured.items():
-                    saved = _save_jobs(jobs)
-                    results[platform] = len(jobs)
-                    finished = datetime.datetime.now(datetime.timezone.utc)
-                    error = browser_collector.errors.get(platform, "")
-                    status_fields = {
-                        "status": "failed" if error else ("success" if jobs else "empty"),
-                        "last_started_at": finished, "last_finished_at": finished,
-                        "last_job_count": len(jobs), "last_saved_count": saved,
-                        "last_duration_ms": round((time.monotonic() - started) * 1000),
-                        "last_error": error or ("页面未显示职位，可能需要登录或被平台风控拦截" if not jobs else ""),
-                    }
-                    if jobs and not error:
-                        status_fields["last_success_at"] = finished
-                    _update_status(platform, **status_fields)
-                cleanup = _expire_and_cleanup()
-                logger.info("browser_crawl_cycle_done", extra={"results": results, "cleanup": cleanup})
-            except Exception as exc:
-                logger.error("scheduler_cycle_error", extra={"error": str(exc)})
-
-            next_run = datetime.datetime.now() + datetime.timedelta(seconds=CRAWL_INTERVAL_SECONDS)
-            logger.info("scheduler_next_run", extra={"next_at": next_run.isoformat()})
-            await asyncio.sleep(CRAWL_INTERVAL_SECONDS)
-    finally:
-        await browser_collector.close()
+    logger.info("crawler_scheduler_started", extra={"interval_seconds": CRAWL_INTERVAL_SECONDS})
+    while True:
+        started = datetime.datetime.now(datetime.timezone.utc)
+        try:
+            await _run_once()
+        except Exception as exc:
+            logger.error("scheduler_cycle_error", extra={"error": str(exc)})
+        next_run = started + datetime.timedelta(seconds=CRAWL_INTERVAL_SECONDS)
+        remaining = (next_run - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+        delay = max(MIN_IDLE_SECONDS, remaining)
+        logger.info(
+            "scheduler_next_run",
+            extra={
+                "next_at": (
+                    datetime.datetime.now(datetime.timezone.utc)
+                    + datetime.timedelta(seconds=delay)
+                ).isoformat(),
+                "overran": remaining < 0,
+                "cursor": cursor_snapshot(),
+            },
+        )
+        await asyncio.sleep(delay)
 
 
 if __name__ == "__main__":
