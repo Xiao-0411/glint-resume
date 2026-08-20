@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import List
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from app.crawlers.base import BaseCrawler, JOB_KEYWORDS, select_cities
+from app.crawlers.base import BaseCrawler, select_cities, select_keywords
 from app.crawlers.cdp_browser import fetch_boss_detail
 
 VENDORED_DIR = Path(__file__).resolve().parents[2] / "vendor" / "boss-zhipin-scraper"
@@ -141,11 +141,10 @@ class ExternalBossCrawler(BaseCrawler):
     async def crawl(self, keywords: List[str] = None, cities: List[str] = None) -> List[dict]:
         jobs: list[dict] = []
         seen: set[str] = set()
-        selected_keywords = keywords or JOB_KEYWORDS
         selected_cities = select_cities(cities)
-        if keywords is None:
-            max_keywords = _env_int("BOSS_SCRAPER_MAX_KEYWORDS", 5, 1, len(JOB_KEYWORDS))
-            selected_keywords = selected_keywords[:max_keywords]
+        # 定时抓取走职位分类树游标，与其他平台保持同一维度；
+        # 用户实时搜索则原样使用传入的关键词。
+        selected_keywords = keywords if keywords is not None else select_keywords()
         for city in selected_cities:
             for keyword in selected_keywords:
                 for raw in await self._run(keyword, city):

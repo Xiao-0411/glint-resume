@@ -93,7 +93,7 @@ def test_cursor_slice_wraps_and_covers_pool():
 
 def test_match_score_uses_title_not_skill_count():
     exact = _calc_match("Java开发", {"title": "Java开发", "requirements": []})
-    assert exact["score"] >= 85 and exact["level"] == "green"
+    assert exact["score"] >= 80 and exact["level"] == "green"
 
     # 技能清单更详细不应该拉低分数
     detailed = _calc_match("Java开发", {
@@ -104,6 +104,78 @@ def test_match_score_uses_title_not_skill_count():
 
     unrelated = _calc_match("Java开发", {"title": "UI设计师", "requirements": []})
     assert unrelated["level"] == "red"
+
+
+def test_short_skill_list_does_not_penalise_matching_job():
+    """JD 写得简略不代表岗位不对口。
+
+    曾经用「命中数 ÷ 目标技能数」加权，导致只列 3 个技能的
+    "Java开发工程师" 得分低于技能更全的同类岗位，甚至被判成红色。
+    """
+    short = _calc_match("Java开发", {
+        "title": "Java开发工程师",
+        "requirements": ["Java", "Maven", "Linux"],
+    })
+    rich = _calc_match("Java开发", {
+        "title": "Java后端开发工程师",
+        "requirements": ["Java", "Spring Boot", "MySQL", "Redis", "数据结构", "系统设计"],
+    })
+    assert short["level"] == "green", f"对口岗位不应因技能少被降级: {short}"
+    assert rich["level"] == "green"
+
+
+def test_jd_backfill_improves_score_over_missing_detail():
+    """补全 JD 后的分数应不低于仅有岗位名时。"""
+    without_jd = _calc_match("Java开发", {"title": "Java开发工程师", "requirements": []})
+    with_jd = _calc_match("Java开发", {
+        "title": "Java开发工程师",
+        "requirements": ["Java", "Spring Boot", "MySQL"],
+    })
+    assert with_jd["score"] >= without_jd["score"]
+    assert "依据有限" in without_jd["reasons"]
+
+
+def test_classifier_normalizes_invalid_values():
+    from app.services.job_classifier import _normalize
+
+    # 模型自创类目/职级时必须回落到安全默认，不能污染库
+    result = _normalize({"category": "自创类目", "level": "资深", "skills": "Java, Spring", "industry": ""})
+    assert result["category"] == "其他"
+    assert result["level"] == "不限"
+    assert result["skills"] == ["Java", "Spring"]
+    assert result["industry"] == "通用"
+
+
+def test_classifier_extracts_json_from_wrapped_output():
+    from app.services.job_classifier import _extract_json_array
+
+    expected = [{"id": 0, "category": "后端开发"}]
+    assert _extract_json_array('[{"id":0,"category":"后端开发"}]') == expected
+    assert _extract_json_array('```json\n[{"id":0,"category":"后端开发"}]\n```') == expected
+    assert _extract_json_array('结果：[{"id":0,"category":"后端开发"}] 完毕') == expected
+
+
+def test_classifier_merges_skills_into_requirements():
+    from app.services.job_classifier import apply_classification
+
+    job = {"title": "Java后端", "requirements": ["Java", "Maven"]}
+    merged = apply_classification(job, {
+        "category": "后端开发", "skills": ["Java", "Redis"], "level": "中级", "industry": "电商",
+    })
+    assert merged["category"] == "后端开发"
+    # Java 已存在不应重复
+    assert merged["requirements"] == ["Java", "Maven", "Redis"]
+
+
+def test_job_catalog_covers_more_than_legacy_keywords():
+    from app.crawlers.base import JOB_KEYWORDS
+    from app.services.job_catalog import category_names
+
+    names = category_names()
+    assert len(names) > len(JOB_KEYWORDS)
+    # 旧关键词表缺失的方向
+    for expected in ("Go开发", "DBA", "供应链管理", "临床研究"):
+        assert expected in names
 
 
 def test_match_score_handles_missing_target():

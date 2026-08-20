@@ -156,6 +156,7 @@
                     <span class="job-company">{{ job.company }}</span>
                     <span class="job-sep">·</span>
                     <span class="job-location">{{ job.location }}</span>
+                    <span v-if="job.category" class="job-category">{{ job.category }}</span>
                     <span v-if="job.education && !job.tags?.includes(job.education)" class="job-tag">{{ job.education }}</span>
                     <span v-for="tag in job.tags" :key="tag" class="job-tag">{{ tag }}</span>
                     <span v-if="job.platform" class="job-source">{{ platformLabel(job.platform) }}</span>
@@ -1447,6 +1448,15 @@ function crawlerStatusTooltip(item) {
   padding: 3px 10px;
   border-radius: var(--radius-xs);
   font-weight: 500;
+}
+/* AI 归类的岗位大类，用主色区分于平台原始标签 */
+.job-category {
+  font-size: 0.85rem;
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  padding: 3px 10px;
+  border-radius: var(--radius-xs);
+  font-weight: 600;
 }
 .job-source {
   font-size: 0.82rem;

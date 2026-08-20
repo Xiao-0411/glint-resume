@@ -162,6 +162,13 @@ class Job(Base):
     description = Column(Text, default="", comment="职位描述")
     requirements = Column(JSON, default=list, comment="职位要求（技能列表）")
     url = Column(String(512), default="", comment="原始链接")
+    category = Column(String(32), default="", index=True, comment="AI 分类的岗位大类")
+    job_level = Column(String(16), default="", comment="AI 判定的职级")
+    industry = Column(String(32), default="", comment="AI 判定的所属行业")
+    detail_status = Column(
+        String(16), default="pending", index=True,
+        comment="JD 补全状态: pending/done/failed/unsupported",
+    )
     is_active = Column(Boolean, default=True, index=True, comment="是否有效")
     crawled_at = Column(DateTime, default=_now, comment="抓取时间")
     created_at = Column(DateTime, default=_now)

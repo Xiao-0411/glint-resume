@@ -171,6 +171,9 @@ def _db_job_search(
             "requirements": row.requirements or [],
             "platform": row.platform,
             "url": row.url or "",
+            "category": row.category or "",
+            "jobLevel": row.job_level or "",
+            "industry": row.industry or "",
             "crawledAt": row.crawled_at.isoformat() if row.crawled_at else "",
         })
     return results
@@ -190,6 +193,9 @@ def _job_payload(row: Job, *, include_description: bool = True) -> dict:
         "requirements": row.requirements or [],
         "platform": row.platform,
         "url": row.url or "",
+        "category": row.category or "",
+        "jobLevel": row.job_level or "",
+        "industry": row.industry or "",
         "crawledAt": row.crawled_at.isoformat() if row.crawled_at else "",
     }
 
@@ -233,13 +239,33 @@ def _is_trusted_job_url(platform: str, url: str) -> bool:
     return parsed.scheme == "https" and bool(domain) and (hostname == domain or hostname.endswith(f".{domain}"))
 
 
+def _direction_score(target: str, title: str, synonyms: list[str]) -> tuple[int, str]:
+    """岗位名方向契合度：0-100 与一句说明。"""
+    title_lower, target_lower = title.lower(), target.lower()
+    if target_lower in title_lower or title_lower in target_lower:
+        return 100, f"岗位名与目标岗位「{target}」高度一致"
+    hits = [word for word in synonyms if word.lower() in title_lower]
+    if hits:
+        return 78, f"岗位方向与「{'、'.join(hits[:3])}」相关"
+    bigrams_target = {target_lower[i:i + 2] for i in range(len(target_lower) - 1)}
+    bigrams_title = {title_lower[i:i + 2] for i in range(len(title_lower) - 1)}
+    if bigrams_target & bigrams_title:
+        # 中文岗位名共享 2 字片段（如"产品经理"↔"产品运营"）视为部分相关。
+        return 60, "岗位方向部分相关"
+    return 20, "岗位方向与目标岗位差异较大"
+
+
 def _calc_match(target_job: str, job: dict) -> dict:
     """计算岗位匹配度。
 
-    以「目标岗位 ↔ 岗位名」的契合度为主判据，技能清单只用于加分说明。
-    早期实现用 KW_MAP 的固定技能表去除以岗位 requirements 的长度，
-    但 requirements 来自平台原始技术栈（SpringCloud、ERP开发经验……），
-    KW_MAP 覆盖不到，导致技能越详细的岗位分数越低——与直觉相反。
+    判据优先级：
+    1. 岗位有真实技能清单（来自 JD 抓取 + AI 提取）时，以「技能覆盖率」为主，
+       岗位名方向为辅，加权得分。技能是最能反映胜任要求的信号。
+    2. 技能清单缺失（JD 尚未补全）时退化为纯岗位名方向判断，并在理由中
+       说明依据有限，避免用一个看似精确的分数误导用户。
+
+    注意不要回到"命中数 ÷ requirements 长度"的老算法：requirements 是平台
+    原始技术栈，条目越详细分母越大，会让好岗位得分反而更低。
     """
     title = str(job.get("title") or "").strip()
     target = (target_job or "").strip()
@@ -248,43 +274,47 @@ def _calc_match(target_job: str, job: dict) -> dict:
     if not title or not target:
         return {"score": 50, "matched_keywords": [], "level": "yellow", "missing": [], "reasons": "匹配度未知"}
 
-    title_lower, target_lower = title.lower(), target.lower()
-    synonyms = next((v for k, v in KW_MAP.items() if k.lower() in target_lower), [])
-    skill_hits = [skill for skill in synonyms if any(skill.lower() in req.lower() for req in requirements)]
+    synonyms = next((v for k, v in KW_MAP.items() if k.lower() in target_job.lower()), [])
+    direction, direction_reason = _direction_score(target, title, synonyms)
 
-    if target_lower in title_lower or title_lower in target_lower:
-        score, level = 92, "green"
-        reasons = f"岗位名与目标岗位「{target}」高度一致"
-        if skill_hits:
-            reasons += f"，且要求「{'、'.join(skill_hits[:3])}」与你的技能吻合"
-    elif [word for word in synonyms if word.lower() in title_lower]:
-        hits = [word for word in synonyms if word.lower() in title_lower]
-        score, level = 74, "yellow"
-        reasons = f"岗位方向与「{'、'.join(hits[:3])}」相关，建议微调简历后投递"
-    elif {target_lower[i:i + 2] for i in range(len(target_lower) - 1)} & {
-        title_lower[i:i + 2] for i in range(len(title_lower) - 1)
-    }:
-        # 中文岗位名共享 2 字以上片段（如"产品经理"↔"产品运营"）视为部分相关。
-        score, level = 62, "yellow"
-        reasons = "岗位方向部分相关，建议结合岗位要求微调简历"
-    elif skill_hits:
-        score, level = 58, "yellow"
-        reasons = f"岗位名方向不同，但要求「{'、'.join(skill_hits[:3])}」与你的技能相关"
+    if requirements and synonyms:
+        # 技能覆盖率：目标岗位的核心技能中，有多少被这个岗位要求命中。
+        hits = [
+            skill for skill in synonyms
+            if any(skill.lower() in req.lower() or req.lower() in skill.lower() for req in requirements)
+        ]
+        coverage = round(len(hits) / len(synonyms) * 100)
+        # 取"方向"与"技能加成后"的较高者。
+        #
+        # 不能简单用覆盖率加权：JD 写得简略（只列 3 个技能）不代表岗位不对口，
+        # 那样会让"Java开发工程师"这种完全对口的岗位因为技能少而被判成低匹配。
+        # 因此以方向分为基线，技能命中只做上浮，命中越多上浮越大。
+        skill_bonus = min(len(hits) * 8, 25) if hits else 0
+        score = max(direction, round(coverage * 0.7 + direction * 0.3)) + skill_bonus
+        score = min(score, 100)
+        matched = hits
+        missing = [skill for skill in synonyms if skill not in hits][:3]
+        if hits:
+            reasons = f"{direction_reason}；岗位要求覆盖你的「{'、'.join(hits[:3])}」等技能"
+        else:
+            reasons = f"{direction_reason}；岗位要求与你的核心技能重合较少"
     else:
-        score, level = 35, "red"
-        reasons = "与目标岗位方向差异较大，建议优先关注更贴近的岗位"
+        # JD 未补全：只能按方向判断，分数适度收敛避免过度自信。
+        score = round(direction * 0.85)
+        matched = []
+        missing = []
+        reasons = f"{direction_reason}（岗位详情尚未补全，匹配度依据有限）"
 
-    # 待补足技能只在岗位给出技能清单、且确有未覆盖项时提示。
-    missing = []
-    if requirements and level != "green":
-        missing = [
-            req for req in requirements
-            if not any(skill.lower() in req.lower() for skill in synonyms)
-        ][:3]
+    if score >= 80:
+        level = "green"
+    elif score >= 55:
+        level = "yellow"
+    else:
+        level = "red"
 
     return {
-        "score": score,
-        "matched_keywords": skill_hits,
+        "score": max(0, min(100, score)),
+        "matched_keywords": matched,
         "level": level,
         "missing": missing,
         "reasons": reasons,

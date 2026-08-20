@@ -22,7 +22,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 ]
 
-# 岗位关键词（全量抓取覆盖各方向）
+# 兜底岗位词。正常情况下抓取维度来自 app.services.job_catalog 的职位分类树
+# （官方类目树或内置基线表），这里只在分类目录完全不可用时使用。
 JOB_KEYWORDS = [
     "产品经理", "Java开发", "前端开发", "后端开发", "数据分析",
     "测试工程师", "运营", "Python开发", "C++开发", "算法工程师",
@@ -43,27 +44,53 @@ PRIORITY_CITIES = [
 ]
 
 
-def select_keywords(keywords: List[str] = None) -> List[str]:
-    """选择本轮抓取的关键词。
+def all_job_categories() -> List[str]:
+    """全量抓取的岗位维度：平台职位分类树。
 
-    显式传入（用户实时搜索）时原样返回。定时抓取时关键词跟随城市游标推进：
-    只有当城市列表走完一整圈，关键词才前进一格，从而覆盖全部「城市 × 关键词」组合。
+    优先用官方类目树，缺失时回落到内置基线表；两者都不可用才用
+    JOB_KEYWORDS 兜底。可用 CRAWLER_KEYWORDS 显式覆盖（逗号分隔）。
+    """
+    raw = os.getenv("CRAWLER_KEYWORDS", "").strip()
+    if raw:
+        selected = [item.strip() for item in raw.split(",") if item.strip()]
+        if selected:
+            return selected
+
+    try:
+        from app.services.job_catalog import category_names
+
+        names = category_names()
+        if names:
+            return names
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("job_catalog_unavailable", extra={"error": str(exc)})
+    return JOB_KEYWORDS
+
+
+def select_keywords(keywords: List[str] = None) -> List[str]:
+    """选择本轮抓取的岗位类别。
+
+    显式传入（用户实时搜索）时原样返回。定时抓取时岗位类别跟随城市游标推进：
+    只有当城市列表走完一整圈，岗位类别才前进一格，从而覆盖
+    全部「城市 × 岗位类别」组合。
     """
     if keywords is not None:
         return keywords
+
+    pool = all_job_categories()
     raw_limit = os.getenv("CRAWLER_MAX_KEYWORDS", "5")
     try:
         limit = int(raw_limit)
     except ValueError as exc:
         raise RuntimeError("CRAWLER_MAX_KEYWORDS 必须是整数") from exc
-    if not 1 <= limit <= len(JOB_KEYWORDS):
-        raise RuntimeError(f"CRAWLER_MAX_KEYWORDS 必须在 1 到 {len(JOB_KEYWORDS)} 之间")
+    if not 1 <= limit <= len(pool):
+        raise RuntimeError(f"CRAWLER_MAX_KEYWORDS 必须在 1 到 {len(pool)} 之间")
 
     from app.crawlers.cursor import city_cycles, slice_at
 
-    # 用城市已完成的圈数决定关键词偏移，关键词游标本身不独立推进。
+    # 用城市已完成的圈数决定岗位类别偏移，类别游标本身不独立推进。
     offset = city_cycles() * limit
-    return slice_at(JOB_KEYWORDS, offset, limit)
+    return slice_at(pool, offset, limit)
 
 
 def all_crawl_cities() -> List[str]:
