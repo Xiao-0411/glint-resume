@@ -60,6 +60,10 @@ cd backend
 
 生产环境建议用 systemd、Supervisor 或 Docker 托管后端进程。
 
+职位爬虫是独立进程，不会随 `uvicorn` 启动。需要常驻抓取时，还必须在云服务器
+运行持久化登录 Chrome 和 `backend/run_crawler.py`，完整步骤见
+[`deploy/CRAWLER.md`](./CRAWLER.md)。
+
 ## 5. Nginx 反向代理
 
 把 `deploy/nginx/sgjl.cloud.conf` 放到服务器：
