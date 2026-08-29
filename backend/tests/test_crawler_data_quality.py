@@ -78,7 +78,9 @@ def test_is_publishable_rejects_incomplete_cards():
 
     # 卡片只抓到按钮文案时的典型残缺记录
     assert not is_publishable({**complete, "company": "未知公司"})
+    assert not is_publishable({**complete, "company": "公司"})
     assert not is_publishable({**complete, "salary": ""})
+    assert not is_publishable({**complete, "salary": "福利优厚"})
     assert not is_publishable({**complete, "location": ""})
     assert not is_publishable({**complete, "location": "火星基地"})
 

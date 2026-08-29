@@ -115,8 +115,10 @@ def monitor(port: int, timeout: int, interval: int, heartbeat: int = 30) -> int:
         print(f"Login monitoring timed out after {timeout} seconds.")
         return 1
     finally:
-        # Keep the three tabs and Chrome open for scheduled crawling.
-        browser.close(close_pages=False)
+        # Login cookies live in the persistent Chrome profile, not in a tab.
+        # Close the monitor's temporary pages so the scheduler does not open
+        # a second page for the same platform after login completes.
+        browser.close(close_pages=True)
 
 
 def main() -> None:

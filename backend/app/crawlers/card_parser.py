@@ -13,7 +13,8 @@ from app.services.location_catalog import city_of, extract_location
 # 卡片上常见的非公司名噪声，多为按钮文案或招聘者信息。
 COMPANY_NOISE = {
     "未知公司", "未知", "立即沟通", "查看详情", "收藏", "已认证", "招聘中",
-    "急聘", "热招", "名企", "猎头顾问", "HR", "-", "—", "",
+    "急聘", "热招", "名企", "猎头顾问", "HR", "公司", "企业", "暂无", "不详",
+    "不便透露", "保密", "-", "—", "",
 }
 COMPANY_SUFFIXES = ("有限公司", "股份公司", "集团", "科技", "研究院", "事务所", "中心", "学校", "医院", "银行")
 
@@ -90,22 +91,34 @@ def clean_title(title: str) -> str:
     return re.sub(r"\s+", " ", normalized)[:100].strip(" -|·")
 
 
+def publishability_reason(job: dict, *, city: str = "") -> str:
+    """Return the reason a card fails the minimum publishable-data contract."""
+    if not isinstance(job, dict):
+        return "职位记录不是对象"
+    title = str(job.get("title") or "").strip()
+    platform_job_id = str(job.get("platform_job_id") or "").strip()
+    if not title or not platform_job_id:
+        return "缺少岗位名称或平台职位ID"
+    if title in COMPANY_NOISE or title in {"职位", "招聘", "岗位"}:
+        return "岗位名称是页面按钮/占位文案"
+    company = str(job.get("company") or "").strip()
+    if not company or company in COMPANY_NOISE or len(company) < 2:
+        return "缺少真实公司名称"
+    salary = str(job.get("salary") or "").strip()
+    if not salary or not parse_salary(salary):
+        return "缺少薪资"
+    location = str(job.get("location") or "").strip()
+    if not location or not city_of(location):
+        return "缺少可识别的工作地点"
+    if city and city_of(location) != city_of(extract_location(city) or city):
+        return "工作地点与本轮目标城市不一致"
+    return ""
+
+
 def is_publishable(job: dict, *, city: str = "") -> bool:
     """入库前的质量闸门。
 
     任一必填字段缺失就丢弃：这些记录在前端只会显示成空白卡片，
     且会拉低搜索结果的可用密度。
     """
-    if not job.get("title") or not job.get("platform_job_id"):
-        return False
-    company = (job.get("company") or "").strip()
-    if not company or company in COMPANY_NOISE:
-        return False
-    if not (job.get("salary") or "").strip():
-        return False
-    location = (job.get("location") or "").strip()
-    if not location or not city_of(location):
-        return False
-    if city and not city_of(location) == city_of(extract_location(city) or city):
-        return False
-    return True
+    return not publishability_reason(job, city=city)

@@ -10,6 +10,7 @@ from app.core.database import SessionLocal, init_db
 from app.core.config import settings
 from app.models.db_models import Job, CrawlerStatus
 from app.crawlers.cursor import cursor_snapshot
+from app.crawlers.card_parser import publishability_reason
 from app.crawlers.zhaopin import ZhaopinCrawler
 from app.crawlers.liepin import LiepinCrawler
 from app.crawlers.external_boss import ExternalBossCrawler
@@ -86,10 +87,30 @@ def _save_jobs(jobs: List[dict]) -> int:
         return 0
 
     deduped = {}
+    rejected = 0
     for job in jobs:
+        # Adapters filter their own cards too, but keep this final gate at the
+        # persistence boundary so a new adapter or malformed BOSS payload can
+        # never create an incomplete searchable record.
+        reason = publishability_reason(job)
+        if reason:
+            rejected += 1
+            logger.warning(
+                "job_rejected_quality",
+                extra={
+                    "platform": job.get("platform", "") if isinstance(job, dict) else "",
+                    "platform_job_id": job.get("platform_job_id", "") if isinstance(job, dict) else "",
+                    "reason": reason,
+                },
+            )
+            continue
         key = (job.get("platform", ""), job.get("platform_job_id", ""))
         if key[0] and key[1]:
             deduped[key] = job
+    logger.info(
+        "jobs_quality_checked",
+        extra={"received": len(jobs), "rejected": rejected, "accepted": len(deduped)},
+    )
     if not deduped:
         return 0
 

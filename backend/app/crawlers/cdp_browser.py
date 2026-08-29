@@ -42,15 +42,50 @@ class CdpBrowser:
         self.port = port
         self._cdp = None
         self._targets: list[str] = []
+        # A crawler keeps one tab per platform and navigates it between
+        # search slices. Login monitoring can still request independent tabs
+        # by leaving ``reuse`` disabled.
+        self._reusable_target: str | None = None
+        self._reusable_session: str | None = None
 
     def connect(self) -> None:
         self._cdp = _vendor().CDPSession(self.port)
 
-    def open_page(self, url: str, *, background: bool = True, wait_seconds: float = 2.5) -> tuple[str, str]:
+    def open_page(
+        self,
+        url: str,
+        *,
+        background: bool = True,
+        wait_seconds: float = 2.5,
+        reuse: bool = False,
+    ) -> tuple[str, str]:
+        """Open a page, optionally reusing this browser's crawler tab.
+
+        ``reuse=True`` is opt-in so callers that need several independent
+        pages (for example the login monitor) retain the old behavior.
+        """
         if self._cdp is None:
             self.connect()
+        if reuse and self._reusable_session and self._reusable_target:
+            stale_target = self._reusable_target
+            try:
+                self.navigate(self._reusable_session, url, wait_seconds=wait_seconds)
+                return self._reusable_target, self._reusable_session
+            except Exception:
+                # Recreate the target if Chrome recycled it after a renderer
+                # crash or a browser restart.
+                self._targets = [target for target in self._targets if target != stale_target]
+                try:
+                    self._cdp.send("Target.closeTarget", {"targetId": stale_target}, timeout=5)
+                except Exception:
+                    pass
+                self._reusable_target = None
+                self._reusable_session = None
         target_id, session_id = _vendor().create_page_session(self._cdp, background=background)
         self._targets.append(target_id)
+        if reuse:
+            self._reusable_target = target_id
+            self._reusable_session = session_id
         self._cdp.send("Page.navigate", {"url": url}, session_id)
         self._cdp.drain_events(wait_seconds)
         return target_id, session_id
@@ -80,6 +115,8 @@ class CdpBrowser:
         finally:
             self._cdp = None
             self._targets.clear()
+            self._reusable_target = None
+            self._reusable_session = None
 
 
 CARD_SCRIPT = r"""

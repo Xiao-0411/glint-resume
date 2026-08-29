@@ -20,13 +20,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.database import SessionLocal  # noqa: E402
 from app.models.db_models import Job  # noqa: E402
+from app.crawlers.card_parser import publishability_reason  # noqa: E402
 
-PLACEHOLDER_COMPANIES = {"未知公司", "未知", "-", "—", ""}
 JD_MARKERS = ("岗位职责", "职位职责", "任职要求", "职位要求", "职位描述", "工作职责", "岗位要求")
 
 
-def is_placeholder_company(job: Job) -> bool:
-    return (job.company or "").strip() in PLACEHOLDER_COMPANIES
+def is_unpublishable(job: Job) -> bool:
+    return bool(publishability_reason({
+        "title": job.title,
+        "platform_job_id": job.platform_job_id,
+        "company": job.company,
+        "salary": job.salary,
+        "location": job.location,
+    }))
 
 
 def is_empty_shell(job: Job) -> bool:
@@ -67,13 +73,13 @@ def main() -> int:
         to_blank: list[Job] = []
 
         for job in jobs:
-            if is_placeholder_company(job) or is_empty_shell(job):
+            if is_unpublishable(job) or is_empty_shell(job):
                 to_delete.append(job)
             elif is_card_text_description(job):
                 to_blank.append(job)
 
         print(f"扫描 {len(jobs)} 条职位")
-        print(f"  待删除（占位公司名 / 关键字段全空）: {len(to_delete)}")
+        print(f"  待删除（缺少岗位名、公司、薪资或地点）: {len(to_delete)}")
         print(f"  待清空 description（卡片文本冒充 JD）: {len(to_blank)}")
 
         by_platform: dict[str, int] = {}

@@ -51,9 +51,13 @@ class LiepinCrawler(BaseCrawler):
         rejected = 0
         try:
             browser.connect()
+            sid = None
             for city in cities:
                 for keyword in keywords:
-                    _, sid = browser.open_page(SEARCH_URL.format(quote(f"{city} {keyword}")))
+                    _, sid = browser.open_page(
+                        SEARCH_URL.format(quote(f"{city} {keyword}")),
+                        reuse=True,
+                    )
                     cards = wait_for_cards(browser, sid, SELECTORS)
                     if not cards:
                         continue

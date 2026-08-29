@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from app.crawlers.base import JOB_KEYWORDS, select_cities, select_keywords
+from app.crawlers.cdp_browser import CdpBrowser
 from app.crawlers.liepin import LiepinCrawler
 from app.crawlers.zhaopin import ZhaopinCrawler
 
@@ -56,5 +57,35 @@ class CardMappingTests(unittest.TestCase):
         self.assertEqual(job["description"], "")
 
 
+class CdpPageLifecycleTests(unittest.TestCase):
+    def test_reusable_page_navigates_without_creating_another_target(self):
+        class FakeCdp:
+            def __init__(self):
+                self.navigations = []
+
+            def send(self, method, params, session_id=None, **kwargs):
+                self.navigations.append((method, params, session_id))
+                return {"result": {}}
+
+            def drain_events(self, _seconds):
+                return None
+
+            def close(self):
+                return None
+
+        fake_cdp = FakeCdp()
+        browser = CdpBrowser()
+        browser._cdp = fake_cdp
+        with patch("app.crawlers.cdp_browser._vendor") as vendor:
+            vendor.return_value.create_page_session.return_value = ("target-1", "session-1")
+            first = browser.open_page("https://example.test/one", reuse=True, wait_seconds=0)
+            second = browser.open_page("https://example.test/two", reuse=True, wait_seconds=0)
+
+        self.assertEqual(first, second)
+        self.assertEqual(vendor.return_value.create_page_session.call_count, 1)
+        self.assertEqual(
+            [item[1]["url"] for item in fake_cdp.navigations if item[0] == "Page.navigate"],
+            ["https://example.test/one", "https://example.test/two"],
+        )
 if __name__ == "__main__":
     unittest.main()
