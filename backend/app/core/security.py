@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+from zoneinfo import ZoneInfo
 from typing import Any, Dict
 
 from app.core.config import settings
@@ -11,6 +12,8 @@ from app.core.config import settings
 
 PASSWORD_SCHEME = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 260000
+DAILY_AUTH_RESET_HOUR = 4
+AUTH_RESET_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def hash_password(password: str) -> str:
@@ -47,9 +50,28 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
+def next_daily_auth_reset(now: datetime.datetime | None = None) -> datetime.datetime:
+    """Return the next 04:00 boundary in UTC (the policy timezone is Beijing)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    local_now = now.astimezone(AUTH_RESET_TIMEZONE)
+    next_reset = local_now.replace(
+        hour=DAILY_AUTH_RESET_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if next_reset <= local_now:
+        next_reset += datetime.timedelta(days=1)
+    return next_reset.astimezone(datetime.timezone.utc)
+
+
 def create_access_token(user_id: str) -> str:
     now = datetime.datetime.now(datetime.timezone.utc)
-    expire = now + datetime.timedelta(minutes=settings.AUTH_TOKEN_EXPIRE_MINUTES)
+    configured_expire = now + datetime.timedelta(minutes=settings.AUTH_TOKEN_EXPIRE_MINUTES)
+    # 令牌最长只保留到北京时间次日 04:00，确保旧令牌无法跨每日登录周期继续使用。
+    expire = min(configured_expire, next_daily_auth_reset(now))
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "sub": user_id,
@@ -90,7 +112,7 @@ def decode_access_token(token: str) -> Dict[str, Any]:
 
     payload = json.loads(_b64decode(payload_raw))
     exp = payload.get("exp")
-    if not isinstance(exp, int) or exp < int(datetime.datetime.now(datetime.timezone.utc).timestamp()):
+    if not isinstance(exp, int) or exp <= int(datetime.datetime.now(datetime.timezone.utc).timestamp()):
         raise ValueError("Token expired")
     if not payload.get("sub"):
         raise ValueError("Token subject missing")

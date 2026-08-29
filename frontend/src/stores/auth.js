@@ -2,9 +2,52 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { apiMode, authApi, profileApi, resumeApi } from '@/api'
 
+const AUTH_TOKEN_KEY = 'auth_token'
+const AUTH_USER_KEY = 'auth_user'
+const AUTH_SESSION_CYCLE_KEY = 'auth_session_cycle'
+const AUTH_RESET_EVENT_KEY = 'auth_daily_reset'
+const DAILY_RESET_HOUR = 4
+const AUTH_TIME_ZONE = 'Asia/Shanghai'
+const AUTH_TIME_ZONE_OFFSET_MS = 8 * 60 * 60 * 1000
+
+function getAuthTimeParts(date) {
+  const values = new Intl.DateTimeFormat('en-US', {
+    timeZone: AUTH_TIME_ZONE,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    hourCycle: 'h23'
+  }).formatToParts(date).reduce((parts, item) => {
+    if (item.type !== 'literal') parts[item.type] = Number(item.value)
+    return parts
+  }, {})
+  return values
+}
+
+/** 返回当前登录周期的日期标识（北京时间，每天 04:00 切换）。 */
+export function getDailyAuthCycle(date = new Date()) {
+  const parts = getAuthTimeParts(date)
+  const cycleDate = new Date(Date.UTC(parts.year, parts.month - 1, parts.day))
+  if (parts.hour < DAILY_RESET_HOUR) cycleDate.setUTCDate(cycleDate.getUTCDate() - 1)
+  const year = cycleDate.getUTCFullYear()
+  const month = String(cycleDate.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(cycleDate.getUTCDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/** 计算下一次北京时间 04:00，供定时器使用。 */
+export function getNextDailyAuthReset(date = new Date()) {
+  const parts = getAuthTimeParts(date)
+  const next = new Date(Date.UTC(parts.year, parts.month - 1, parts.day))
+  if (parts.hour >= DAILY_RESET_HOUR) next.setUTCDate(next.getUTCDate() + 1)
+  // Beijing is UTC+08:00 year-round, so 04:00 Beijing is 20:00 UTC (previous day).
+  return new Date(next.getTime() + (DAILY_RESET_HOUR * 60 * 60 * 1000) - AUTH_TIME_ZONE_OFFSET_MS)
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const user = ref(null)
-  const token = ref(localStorage.getItem('auth_token') || '')
+  const token = ref(localStorage.getItem(AUTH_TOKEN_KEY) || '')
 
   // ---- 登录弹窗全局控制 ----
   const showLogin = ref(false)
@@ -20,6 +63,8 @@ export const useAuthStore = defineStore('auth', () => {
   const userKey = computed(() => (user.value ? (user.value.id || user.value.email || user.value.name || 'guest') : ''))
   const isSuperAdmin = computed(() => user.value?.role === 'super_admin')
   const isAdmin = computed(() => ['admin', 'super_admin'].includes(user.value?.role))
+
+  let dailyResetTimer = null
 
   function openLogin() {
     showLogin.value = true
@@ -85,7 +130,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const currentUser = await authApi.me()
       user.value = normalizeUser(currentUser)
-      localStorage.setItem('auth_user', JSON.stringify(user.value))
+      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user.value))
       await loadHistory()
       return user.value
     } catch (e) {
@@ -100,8 +145,9 @@ export const useAuthStore = defineStore('auth', () => {
   function applyAuthSession(authData) {
     user.value = normalizeUser(authData.user)
     token.value = authData.token
-    localStorage.setItem('auth_token', token.value)
-    localStorage.setItem('auth_user', JSON.stringify(user.value))
+    localStorage.setItem(AUTH_TOKEN_KEY, token.value)
+    localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user.value))
+    localStorage.setItem(AUTH_SESSION_CYCLE_KEY, getDailyAuthCycle())
     loadHistory()
     showLogin.value = false
     // 执行登录前被拦截的操作
@@ -126,7 +172,7 @@ export const useAuthStore = defineStore('auth', () => {
   /** 个人中心改完资料后统一回写本地缓存 */
   function applyUpdatedUser(raw) {
     user.value = normalizeUser(raw)
-    localStorage.setItem('auth_user', JSON.stringify(user.value))
+    localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user.value))
     return user.value
   }
 
@@ -171,10 +217,56 @@ export const useAuthStore = defineStore('auth', () => {
   function logout() {
     user.value = null
     token.value = ''
-    localStorage.removeItem('auth_token')
-    localStorage.removeItem('auth_user')
+    localStorage.removeItem(AUTH_TOKEN_KEY)
+    localStorage.removeItem(AUTH_USER_KEY)
+    localStorage.removeItem(AUTH_SESSION_CYCLE_KEY)
     resumeHistory.value = []
     lastLoginViaGate.value = false
+  }
+
+  function enforceDailyAuthReset({ broadcast = true } = {}) {
+    const cycle = getDailyAuthCycle()
+    const hasSession = Boolean(token.value || user.value || localStorage.getItem(AUTH_TOKEN_KEY))
+    if (!hasSession) return false
+
+    // Broadcast before clearing local state; storage events do not fire in the source tab.
+    if (broadcast) localStorage.setItem(AUTH_RESET_EVENT_KEY, cycle)
+    logout()
+    openLogin()
+    return true
+  }
+
+  function checkDailyAuthReset() {
+    if (!token.value) return false
+    const currentCycle = getDailyAuthCycle()
+    const sessionCycle = localStorage.getItem(AUTH_SESSION_CYCLE_KEY)
+    if (!sessionCycle || sessionCycle !== currentCycle) {
+      return enforceDailyAuthReset()
+    }
+    return false
+  }
+
+  function scheduleDailyAuthReset() {
+    if (dailyResetTimer) clearTimeout(dailyResetTimer)
+    const delay = Math.max(1000, getNextDailyAuthReset().getTime() - Date.now())
+    dailyResetTimer = setTimeout(() => {
+      checkDailyAuthReset()
+      scheduleDailyAuthReset()
+    }, delay)
+  }
+
+  function handleAuthStorageChange(event) {
+    if (
+      event.key === AUTH_RESET_EVENT_KEY &&
+      event.newValue === getDailyAuthCycle() &&
+      isLoggedIn.value
+    ) {
+      enforceDailyAuthReset({ broadcast: false })
+    }
+  }
+
+  function handleAuthWindowResume() {
+    checkDailyAuthReset()
   }
 
   // ---- 简历历史读写 ----
@@ -263,15 +355,15 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   // ---- 初始化：恢复登录状态 + 历史 ----
-  const savedUser = localStorage.getItem('auth_user')
+  const savedUser = localStorage.getItem(AUTH_USER_KEY)
   if (savedUser) {
     try {
       user.value = normalizeUser(JSON.parse(savedUser))
       if (!user.value.id) {
         user.value = null
         token.value = ''
-        localStorage.removeItem('auth_token')
-        localStorage.removeItem('auth_user')
+        localStorage.removeItem(AUTH_TOKEN_KEY)
+        localStorage.removeItem(AUTH_USER_KEY)
       }
     } catch {
       user.value = null
@@ -279,6 +371,13 @@ export const useAuthStore = defineStore('auth', () => {
   }
   if (user.value && token.value) {
     loadHistory()
+  }
+  checkDailyAuthReset()
+  scheduleDailyAuthReset()
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', handleAuthStorageChange)
+    window.addEventListener('focus', handleAuthWindowResume)
+    document.addEventListener('visibilitychange', handleAuthWindowResume)
   }
 
   return {
