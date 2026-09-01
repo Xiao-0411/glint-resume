@@ -225,10 +225,12 @@ export async function sendChatStream(payload, handlers = {}) {
   }
 
   try {
+    let terminalEventSeen = false
     for await (const evt of parseSSEStream(response)) {
       if (evt.event === 'delta' && evt.data?.text) {
         handlers.onDelta?.(evt.data.text)
       } else if (evt.event === 'done') {
+        terminalEventSeen = true
         handlers.onDone?.({
           stage: evt.data.stage,
           stageLabel: evt.data.stage_label,
@@ -239,9 +241,13 @@ export async function sendChatStream(payload, handlers = {}) {
         })
         return
       } else if (evt.event === 'error') {
+        terminalEventSeen = true
         handlers.onError?.(new Error(evt.data?.message || '流式错误'))
         return
       }
+    }
+    if (!terminalEventSeen) {
+      handlers.onError?.(new Error('流式响应未完整结束，请重试'))
     }
   } catch (e) {
     if (e?.name === 'AbortError') throw e

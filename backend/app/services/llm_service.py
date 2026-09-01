@@ -25,6 +25,15 @@ class LLMQuotaExceeded(LLMError):
     pass
 
 
+class LLMStreamIncomplete(LLMError):
+    """上游在回复完整结束前终止了输出。"""
+
+    def __init__(self, message: str, *, reason: str = "", partial_text: str = ""):
+        super().__init__(message)
+        self.reason = reason
+        self.partial_text = partial_text
+
+
 _usage_context = ContextVar("llm_usage_context", default={})
 
 
@@ -155,12 +164,20 @@ async def chat_complete(
     usage = _extract_usage(data)
     prompt_tokens = usage.get("prompt_tokens") or estimated_prompt_tokens
     completion_tokens = usage.get("completion_tokens") or llm_usage_service.estimate_text_tokens(text)
+    stop_reason = _extract_stop_reason(data)
+    status = "truncated" if _is_length_stop(stop_reason) else "success"
     _record_usage(
         payload=payload,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        status="success",
+        status=status,
     )
+    if _is_length_stop(stop_reason):
+        raise LLMStreamIncomplete(
+            f"LLM 回复达到输出上限({stop_reason})",
+            reason=stop_reason,
+            partial_text=text,
+        )
     return text
 
 
@@ -197,10 +214,14 @@ async def chat_stream(
     completion_tokens = 0
     text_parts: List[str] = []
     completed = False
+    terminal_event_seen = False
+    stop_reason = ""
 
     for attempt in range(settings.LLM_MAX_RETRIES + 1):
         is_last = attempt == settings.LLM_MAX_RETRIES
         retryable_error = None
+        terminal_event_seen = False
+        stop_reason = ""
         async with httpx.AsyncClient(timeout=request_timeout) as client:
             try:
                 async with client.stream(
@@ -223,25 +244,38 @@ async def chat_stream(
                             raise LLMError(f"LLM {message}")
 
                     if retryable_error is None:
+                        sse_event_name = ""
                         async for raw_line in resp.aiter_lines():
                             if not raw_line:
                                 continue
                             line = raw_line.strip()
+                            if line.startswith("event:"):
+                                sse_event_name = line[6:].strip().lower()
+                                continue
                             if line.startswith("data:"):
                                 data_str = line[5:].strip()
-                                if not data_str or data_str == "[DONE]":
+                                if not data_str:
+                                    continue
+                                if data_str == "[DONE]":
+                                    terminal_event_seen = True
                                     continue
                                 try:
                                     data = json.loads(data_str)
                                 except json.JSONDecodeError:
                                     continue
+                                event_type = str(data.get("type") or sse_event_name).lower()
+                                sse_event_name = ""
+                                event_stop_reason = _extract_stop_reason(data)
+                                if event_stop_reason:
+                                    stop_reason = event_stop_reason
+                                    terminal_event_seen = True
                                 usage = _extract_usage(data)
                                 if usage.get("prompt_tokens"):
                                     prompt_tokens = usage["prompt_tokens"]
                                 if usage.get("completion_tokens"):
                                     completion_tokens = usage["completion_tokens"]
                                 # 文本增量
-                                if data.get("type") == "content_block_delta":
+                                if event_type == "content_block_delta":
                                     delta = data.get("delta", {})
                                     if delta.get("type") == "text_delta":
                                         text = delta.get("text", "")
@@ -249,7 +283,7 @@ async def chat_stream(
                                             text_parts.append(text)
                                             yield text
                                 # 错误事件
-                                elif data.get("type") == "error":
+                                elif event_type == "error":
                                     err = data.get("error", {})
                                     message = (
                                         f"LLM 流式错误: {err.get('type', 'unknown')} "
@@ -263,6 +297,38 @@ async def chat_stream(
                                         error_message=message,
                                     )
                                     raise LLMError(message)
+                                elif event_type == "message_stop":
+                                    terminal_event_seen = True
+
+                        partial_text = "".join(text_parts)
+                        if _is_length_stop(stop_reason):
+                            message = f"LLM 回复达到输出上限({stop_reason})"
+                            _record_usage(
+                                payload=payload,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens(partial_text),
+                                status="truncated",
+                                error_message=message,
+                            )
+                            raise LLMStreamIncomplete(
+                                message,
+                                reason=stop_reason,
+                                partial_text=partial_text,
+                            )
+                        if not terminal_event_seen:
+                            message = "LLM 流在结束事件到达前中断"
+                            _record_usage(
+                                payload=payload,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens(partial_text),
+                                status="error",
+                                error_message=message,
+                            )
+                            raise LLMStreamIncomplete(
+                                message,
+                                reason="missing_terminal_event",
+                                partial_text=partial_text,
+                            )
                         completed = True
             except httpx.RequestError as e:
                 message = f"网络错误: {e}"
@@ -360,6 +426,28 @@ def _extract_usage(data: Dict) -> Dict[str, int]:
             "completion_tokens",
             "output_token_count",
         ),
+    }
+
+
+def _extract_stop_reason(data: Dict) -> str:
+    """兼容 Anthropic 与 OpenAI 风格的结束原因字段。"""
+    candidates = [
+        data.get("stop_reason"),
+        (data.get("delta") or {}).get("stop_reason") if isinstance(data.get("delta"), dict) else None,
+        (data.get("message") or {}).get("stop_reason") if isinstance(data.get("message"), dict) else None,
+    ]
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        candidates.append(choices[0].get("finish_reason"))
+    for value in candidates:
+        if value:
+            return str(value).strip().lower()
+    return ""
+
+
+def _is_length_stop(reason: str) -> bool:
+    return (reason or "").lower() in {
+        "max_tokens", "max_output_tokens", "length", "model_length",
     }
 
 

@@ -107,7 +107,7 @@ async def chat(
             return
 
         # ==== 走真 LLM ====
-        had_error = False
+        sent_any_delta = False
         with llm_service.usage_context(
             user_id=user_id,
             session_id=req.session_id,
@@ -118,12 +118,16 @@ async def chat(
                 req.session_id, req.target_job, req.user_message, req.user_msg_count, user_id
             ):
                 if event_name == "error":
-                    had_error = True
                     logger.warning("chat_llm_fallback", extra={
                         "session_id": req.session_id,
                         "user_id": user_id,
                         "error": payload,
                     })
+                    # 已经输出过正文时不能再拼接一段 mock，否则会形成“半截真回复 +
+                    # 示例回复”的混合内容。把错误明确交给前端提示用户即可。
+                    if sent_any_delta:
+                        yield {"event": "error", "data": payload}
+                        return
                     # LLM 失败,fallback 到 mock
                     mock = mock_chat_reply(req.target_job, req.user_msg_count)
                     session_store.set_stage(req.session_id, mock["stage"], user_id)
@@ -145,6 +149,8 @@ async def chat(
                         }, ensure_ascii=False)
                     }
                     return
+                if event_name == "delta":
+                    sent_any_delta = True
                 yield {"event": event_name, "data": payload}
 
     return EventSourceResponse(event_generator())

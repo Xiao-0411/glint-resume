@@ -156,15 +156,30 @@ const lastAiIdx = computed(() => {
   return -1
 })
 
-// 当前 stage -> 已完成的简历 section 列表
-// 用户确认后才填入：当 AI 进入下一 stage,意味着上一 stage 用户已输入
+// 有真实抽取数据时按数据立即展示，允许用户跨阶段补充内容；尚无真实数据的
+// mock 流程仍按 stage 展示示例排版。
 const completedSections = computed(() => {
+  const profile = store.extractedProfile || {}
+  const skills = profile.skills || {}
+  const populated = []
+  if (profile.fullname || profile.email || profile.phone || profile.location) populated.push('basic')
+  if (Array.isArray(profile.education) && profile.education.length) populated.push('education')
+  if (Array.isArray(profile.experiences) && profile.experiences.length) populated.push('experiences')
+  if (
+    (Array.isArray(skills.technical) && skills.technical.length) ||
+    (Array.isArray(skills.tools) && skills.tools.length) ||
+    (Array.isArray(skills.product) && skills.product.length) ||
+    (Array.isArray(skills.soft) && skills.soft.length)
+  ) populated.push('skills')
+  if (Array.isArray(profile.awards) && profile.awards.length) populated.push('awards')
+  if (populated.length) return populated
+
   const stage = store.currentStage
   if (stage === 'basic_info') return []
   if (stage === 'education') return ['basic']
   if (stage === 'experience_mining') return ['basic', 'education']
-  if (stage === 'skills') return ['basic', 'education', 'experiences']
-  if (stage === 'awards') return ['basic', 'education', 'experiences', 'skills']
+  if (stage === 'awards') return ['basic', 'education', 'experiences']
+  if (stage === 'skills') return ['basic', 'education', 'experiences', 'awards']
   if (stage === 'ready_to_generate') return ['basic', 'education', 'experiences', 'skills', 'awards']
   return []
 })
@@ -269,6 +284,7 @@ async function sendUserMessage(text) {
             store.pushMessage('ai', `抱歉，出了点问题：${err.message || '请稍后重试'}`)
           } else {
             store.finishStreamingMessage(aiIdx)
+            store.pushMessage('ai', `刚才的回复未能完整生成：${err.message || '请重新发送上一条内容'}`)
           }
         }
       }

@@ -236,13 +236,20 @@ export const useAuthStore = defineStore('auth', () => {
     return true
   }
 
-  function checkDailyAuthReset() {
-    if (!token.value) return false
+  function checkDailyAuthReset({ initializing = false } = {}) {
+    if (!token.value || !user.value) return false
     const currentCycle = getDailyAuthCycle()
     const sessionCycle = localStorage.getItem(AUTH_SESSION_CYCLE_KEY)
-    if (!sessionCycle || sessionCycle !== currentCycle) {
+    if (!sessionCycle) {
+      // Accounts created before the daily-cycle marker was introduced remain logged in
+      // on their first load; subsequent boundary checks are still enforced normally.
+      if (initializing) {
+        localStorage.setItem(AUTH_SESSION_CYCLE_KEY, currentCycle)
+        return false
+      }
       return enforceDailyAuthReset()
     }
+    if (sessionCycle !== currentCycle) return enforceDailyAuthReset()
     return false
   }
 
@@ -354,7 +361,7 @@ export const useAuthStore = defineStore('auth', () => {
     persistHistory()
   }
 
-  // ---- 初始化：恢复登录状态 + 历史 ----
+  // ---- 初始化：恢复登录状态 + 历史；每日重置仅在周期边界触发 ----
   const savedUser = localStorage.getItem(AUTH_USER_KEY)
   if (savedUser) {
     try {
@@ -372,7 +379,7 @@ export const useAuthStore = defineStore('auth', () => {
   if (user.value && token.value) {
     loadHistory()
   }
-  checkDailyAuthReset()
+  checkDailyAuthReset({ initializing: true })
   scheduleDailyAuthReset()
   if (typeof window !== 'undefined') {
     window.addEventListener('storage', handleAuthStorageChange)

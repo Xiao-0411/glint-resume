@@ -17,7 +17,9 @@ class Settings:
     # 实时对话用的快模型：牺牲一点质量换首字节延迟，对话体验优先
     LLM_MODEL_FAST: str = os.getenv("LLM_MODEL_FAST", "deepseek-v4-flash")
     LLM_ANTHROPIC_VERSION: str = os.getenv("LLM_ANTHROPIC_VERSION", "2023-06-01")
-    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+    # 对话单独保留可调上限。默认继承全局值，避免部署环境漏配时退回过小上限。
+    LLM_CHAT_MAX_TOKENS: int = int(os.getenv("LLM_CHAT_MAX_TOKENS", str(LLM_MAX_TOKENS)))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     # 单次请求超时：pro 实测单次 70~115s（网关较慢），给到 180s 避免正常请求被误杀；
     # 前端 240s 超时，留出兜底与响应回传的余量。

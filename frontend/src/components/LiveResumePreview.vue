@@ -110,6 +110,12 @@
                 <span v-for="s in displayResume.skills.technical" :key="s" class="chip">{{ s }}</span>
               </div>
             </div>
+            <div v-if="displayResume.skills.tools.length" class="skill-row">
+              <span class="skill-label">工具</span>
+              <div class="skill-chips">
+                <span v-for="s in displayResume.skills.tools" :key="s" class="chip">{{ s }}</span>
+              </div>
+            </div>
             <div class="skill-row">
               <span class="skill-label">产品能力</span>
               <div class="skill-chips">
@@ -173,9 +179,14 @@ const hasReal = computed(() => {
   const skills = p.skills || {}
   return !!(
     p.fullname ||
+    p.email ||
+    p.phone ||
+    p.location ||
     (Array.isArray(p.education) && p.education.length) ||
     (Array.isArray(p.experiences) && p.experiences.length) ||
     (Array.isArray(skills.technical) && skills.technical.length) ||
+    (Array.isArray(skills.tools) && skills.tools.length) ||
+    (Array.isArray(skills.product) && skills.product.length) ||
     (Array.isArray(skills.soft) && skills.soft.length) ||
     (Array.isArray(p.awards) && p.awards.length)
   )
@@ -208,6 +219,7 @@ function mapProfile(p) {
     })),
     skills: {
       technical: (p.skills && p.skills.technical) || [],
+      tools: (p.skills && p.skills.tools) || [],
       product: (p.skills && p.skills.product) || [],
       soft: (p.skills && p.skills.soft) || []
     },

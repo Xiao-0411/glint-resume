@@ -32,16 +32,16 @@
       </div>
     </div>
     <div class="avatar avatar-user" v-if="role === 'user'">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-        <circle cx="12" cy="7" r="4"/>
-      </svg>
+      <img v-if="avatarUrl" :src="avatarUrl" class="avatar-image" alt="头像" />
+      <span v-else class="avatar-initial">{{ userInitial }}</span>
     </div>
   </div>
 </template>
 
 <script setup>
 import { computed, ref, watch, onMounted } from 'vue'
+import { useAuthStore } from '@/stores/auth'
+import { resolveAssetUrl } from '@/api'
 import BrandMark from '@/components/BrandMark.vue'
 
 const props = defineProps({
@@ -58,11 +58,14 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['typing-done', 'quick'])
+const auth = useAuthStore()
 
 const displayed = ref('')
 const typing = ref(false)
 
 const renderedParts = computed(() => parseMarkdown(displayed.value))
+const avatarUrl = computed(() => resolveAssetUrl(auth.user?.avatar))
+const userInitial = computed(() => auth.user?.name?.charAt(0)?.toUpperCase() || 'U')
 
 const formattedTime = computed(() => {
   const d = new Date(props.ts)
@@ -152,7 +155,7 @@ function pushPlainText(parts, text) {
 }
 
 .role-user {
-  flex-direction: row-reverse;
+  justify-content: flex-end;
 }
 
 .avatar {
@@ -182,6 +185,21 @@ function pushPlainText(parts, text) {
 .avatar-user {
   background: linear-gradient(135deg, #374151, #111827);
   box-shadow: 0 4px 12px rgba(17, 24, 39, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-radius: 50%;
+  overflow: hidden;
+}
+
+.avatar-image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.avatar-initial {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .bubble-wrap {

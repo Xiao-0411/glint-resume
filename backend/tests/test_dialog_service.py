@@ -1,7 +1,8 @@
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from app.services import dialog_service
+from app.services import dialog_service, llm_service
 
 
 def complete_experience():
@@ -90,6 +91,33 @@ class StageGapTests(unittest.TestCase):
         self.assertEqual(len(merged), 2)
         self.assertEqual(merged[1]["title"], "Campus Design Competition")
 
+    def test_project_recap_overrides_lagging_education_stage(self):
+        recap = """
+        - 项目名称：智能 Agent 系统
+        - 核心功能：读取、修改并执行服务器命令
+        - 个人角色：独立开发
+        - 技术栈：Spring Boot + DeepSeek API
+        """
+
+        stage = dialog_service._infer_extraction_stage("education", recap)
+
+        self.assertEqual(stage, "experience_mining")
+
+    def test_single_technical_keyword_does_not_override_education_stage(self):
+        recap = "学校课程中使用过 Java，以上教育信息是否准确？"
+
+        stage = dialog_service._infer_extraction_stage("education", recap)
+
+        self.assertEqual(stage, "education")
+
+    def test_continuation_overlap_is_removed(self):
+        existing = "这段经历能体现你的独立开发能力"
+        continuation = "独立开发能力，也能体现真实落地经验。"
+
+        result = dialog_service._trim_continuation_overlap(existing, continuation)
+
+        self.assertEqual(result, "，也能体现真实落地经验。")
+
 
 class StageTransitionTests(unittest.IsolatedAsyncioTestCase):
     def make_session(self, extracted):
@@ -156,6 +184,74 @@ class StageTransitionTests(unittest.IsolatedAsyncioTestCase):
         _, stage, _, _ = await self.prepare(session, "下一步")
 
         self.assertEqual(stage, "awards")
+
+
+class StreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incomplete_stream_is_continued_before_done(self):
+        session = {
+            "session_id": "test-session",
+            "target_job": "Java 后端",
+            "messages": [{"role": "user", "content": "介绍一下项目"}],
+            "stage": "experience_mining",
+            "extracted": {},
+        }
+        store = FakeSessionStore(session)
+
+        async def interrupted_stream(*args, **kwargs):
+            yield "这段经历可以体现你的"
+            raise llm_service.LLMStreamIncomplete(
+                "达到输出上限",
+                reason="max_tokens",
+                partial_text="这段经历可以体现你的",
+            )
+
+        with (
+            patch.object(dialog_service, "session_store", store),
+            patch.object(
+                dialog_service,
+                "prepare_stage_info",
+                AsyncMock(return_value=(session, "experience_mining", "system", [])),
+            ),
+            patch.object(dialog_service.llm_service, "chat_stream", interrupted_stream),
+            patch.object(
+                dialog_service.llm_service,
+                "chat_complete",
+                AsyncMock(return_value="独立开发能力。"),
+            ),
+        ):
+            events = [
+                (event_name, json.loads(payload))
+                async for event_name, payload in dialog_service.chat_stream(
+                    "test-session", "Java 后端", "介绍一下项目", 3, "user-1"
+                )
+            ]
+
+        deltas = [payload["text"] for name, payload in events if name == "delta"]
+        self.assertEqual("".join(deltas), "这段经历可以体现你的独立开发能力。")
+        self.assertEqual(events[-1][0], "done")
+        self.assertEqual(
+            session["messages"][-1]["content"],
+            "这段经历可以体现你的独立开发能力。",
+        )
+
+
+class LLMFinishReasonTests(unittest.TestCase):
+    def test_anthropic_length_stop_is_detected(self):
+        reason = llm_service._extract_stop_reason({
+            "type": "message_delta",
+            "delta": {"stop_reason": "max_tokens"},
+        })
+
+        self.assertEqual(reason, "max_tokens")
+        self.assertTrue(llm_service._is_length_stop(reason))
+
+    def test_openai_finish_reason_is_detected(self):
+        reason = llm_service._extract_stop_reason({
+            "choices": [{"finish_reason": "length"}],
+        })
+
+        self.assertEqual(reason, "length")
+        self.assertTrue(llm_service._is_length_stop(reason))
 
 
 if __name__ == "__main__":

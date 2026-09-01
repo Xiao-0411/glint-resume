@@ -137,6 +137,17 @@ NO_MORE_EXPERIENCE_WORDS = [
     "暂时没有", "没有了", "没了", "无其他"
 ]
 
+RECAP_STAGE_SIGNALS = {
+    "basic_info": ["姓名", "手机号", "电话", "邮箱", "所在城市", "基本信息"],
+    "education": ["学校", "专业", "学历", "毕业时间", "gpa", "教育背景", "核心课程"],
+    "experience_mining": [
+        "项目名称", "项目经历", "实习经历", "核心功能", "个人角色",
+        "关键行动", "实际使用", "star-l", "项目背景",
+    ],
+    "awards": ["获奖", "奖项", "荣誉", "奖学金", "证书"],
+    "skills": ["技能清单", "专业技能", "技术栈", "工具", "软技能"],
+}
+
 
 def _clean_user_message(message: str) -> str:
     return (message or "").strip().rstrip("。！？,.!?")
@@ -159,6 +170,67 @@ def _is_confirmation_only(message: str) -> bool:
     # "确认，没有其他经历了" is still a confirmation, while a longer
     # sentence containing new details must stay in the current stage.
     return len(clean_msg) <= 18 and _is_no_more_experience(clean_msg)
+
+
+def _infer_extraction_stage(current_stage: str, recap: str) -> str:
+    """按 recap 的实际内容选择抽取器，容忍前端阶段暂时落后于用户话题。"""
+    text = (recap or "").lower()
+    scores = {
+        stage: sum(1 for signal in signals if signal.lower() in text)
+        for stage, signals in RECAP_STAGE_SIGNALS.items()
+    }
+    best_stage = max(scores, key=scores.get)
+    best_score = scores[best_stage]
+    current_score = scores.get(current_stage, 0)
+    # 至少出现两个同类结构信号才覆盖状态机，避免单个“技术栈”等词误判。
+    if best_score >= 2 and best_score > current_score:
+        return best_stage
+    return current_stage
+
+
+def _reply_looks_complete(text: str) -> bool:
+    stripped = (text or "").rstrip()
+    if not stripped:
+        return False
+    return stripped[-1] in "。！？.!?；;：:)）】]」』'\""
+
+
+def _trim_continuation_overlap(existing: str, continuation: str) -> str:
+    """移除续写开头与已有结尾的重叠，避免断点附近重复。"""
+    new_text = (continuation or "").strip()
+    if not new_text:
+        return ""
+    max_overlap = min(len(existing), len(new_text), 120)
+    for size in range(max_overlap, 5, -1):
+        if existing[-size:] == new_text[:size]:
+            return new_text[size:].lstrip()
+    return new_text
+
+
+async def _continue_incomplete_reply(
+    messages: List[Dict],
+    system_prompt: str,
+    partial_reply: str,
+) -> str:
+    continuation_messages = [
+        *messages,
+        {"role": "assistant", "content": partial_reply},
+        {
+            "role": "user",
+            "content": (
+                "上一条回复在传输中途被截断。请从断点处继续，只输出尚未完成的正文；"
+                "不要重复已有内容，不要解释中断原因，并确保最后一句完整结束。"
+            ),
+        },
+    ]
+    continuation = await llm_service.chat_complete(
+        continuation_messages,
+        system=system_prompt,
+        max_tokens=settings.LLM_CHAT_MAX_TOKENS,
+        model=settings.LLM_MODEL_FAST,
+        timeout=settings.LLM_TIMEOUT_FAST_SECONDS,
+    )
+    return _trim_continuation_overlap(partial_reply, continuation)
 
 
 def _has_value(value) -> bool:
@@ -409,11 +481,44 @@ async def chat_stream(
         async for delta in llm_service.chat_stream(
             messages,
             system=system_prompt,
+            max_tokens=settings.LLM_CHAT_MAX_TOKENS,
             model=settings.LLM_MODEL_FAST,
             timeout=settings.LLM_TIMEOUT_FAST_SECONDS,
         ):
             full_reply_parts.append(delta)
             yield ("delta", json.dumps({"text": delta}, ensure_ascii=False))
+    except llm_service.LLMStreamIncomplete as e:
+        partial_reply = ("".join(full_reply_parts).strip() or e.partial_text.strip())
+        if e.reason == "missing_terminal_event" and _reply_looks_complete(partial_reply):
+            logger.warning("chat_stream_missing_terminal_but_complete", extra={
+                "stage": next_stage,
+                "reply_len": len(partial_reply),
+            })
+        elif partial_reply:
+            try:
+                continuation = await _continue_incomplete_reply(
+                    messages, system_prompt, partial_reply
+                )
+            except llm_service.LLMError as continuation_error:
+                yield ("error", json.dumps({
+                    "message": f"回复续写失败: {continuation_error}"
+                }, ensure_ascii=False))
+                return
+            if not continuation:
+                yield ("error", json.dumps({
+                    "message": "回复在中途结束，且未能补全"
+                }, ensure_ascii=False))
+                return
+            full_reply_parts.append(continuation)
+            yield ("delta", json.dumps({"text": continuation}, ensure_ascii=False))
+            logger.warning("chat_stream_continued", extra={
+                "stage": next_stage,
+                "reason": e.reason,
+                "continuation_len": len(continuation),
+            })
+        else:
+            yield ("error", json.dumps({"message": str(e)}, ensure_ascii=False))
+            return
     except llm_service.LLMError as e:
         yield ("error", json.dumps({"message": str(e)}, ensure_ascii=False))
         return
@@ -529,9 +634,14 @@ async def _incremental_extract(
     """
     增量提取:根据当前阶段和 AI 的 recap,提取结构化数据存入 session
     """
-    logger.info("incremental_extract_start", extra={"stage": stage, "recap_len": len(ai_recap)})
+    extraction_stage = _infer_extraction_stage(stage, ai_recap)
+    logger.info("incremental_extract_start", extra={
+        "stage": stage,
+        "extraction_stage": extraction_stage,
+        "recap_len": len(ai_recap),
+    })
 
-    if stage == "basic_info":
+    if extraction_stage == "basic_info":
         # 从 AI recap 中提取姓名/电话/邮箱/城市
         prompt = f"""从下面 AI 的总结中,提取用户的基本信息,输出 JSON:
 AI 总结: \"\"\"{ai_recap}\"\"\"
@@ -549,7 +659,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
         except Exception as e:
             logger.warning("incremental_extract_basic_info_failed", extra={"error": str(e)})
 
-    elif stage == "education":
+    elif extraction_stage == "education":
         prompt = f"""从下面 AI 的总结中,提取用户的教育背景,输出 JSON 数组:
 AI 总结: \"\"\"{ai_recap}\"\"\"
 
@@ -566,7 +676,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
         except Exception as e:
             logger.warning("incremental_extract_education_failed", extra={"error": str(e)})
 
-    elif stage == "experience_mining":
+    elif extraction_stage == "experience_mining":
         # 从最近几条消息中提取经历
         session = _store_get(session_id, user_id)
         recent = "\n".join([f"{m['role']}: {m['content']}" for m in session.get("messages", [])[-14:]])
@@ -594,7 +704,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
         except Exception as e:
             logger.warning("incremental_extract_experience_failed", extra={"error": str(e)})
 
-    elif stage == "awards":
+    elif extraction_stage == "awards":
         prompt = f"""从下面 AI 的总结中,提取用户的获奖荣誉,输出 JSON 数组:
 AI 总结: \"\"\"{ai_recap}\"\"\"
 
@@ -611,7 +721,7 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
         except Exception as e:
             logger.warning("incremental_extract_awards_failed", extra={"error": str(e)})
 
-    elif stage == "skills":
+    elif extraction_stage == "skills":
         prompt = f"""从下面 AI 的总结中,提取用户的技能,输出 JSON:
 AI 总结: \"\"\"{ai_recap}\"\"\"
 
