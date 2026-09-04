@@ -118,6 +118,48 @@ class StageGapTests(unittest.TestCase):
 
         self.assertEqual(result, "，也能体现真实落地经验。")
 
+    def test_recap_is_not_committed_without_confirmation(self):
+        recap = "- 姓名：肖伟众\n以上信息是否准确？如无误请回复“确认”。"
+
+        self.assertFalse(dialog_service._should_commit_recap(
+            "basic_info", recap, "我还要补充一下邮箱"
+        ))
+
+    def test_recap_is_committed_only_after_confirmation(self):
+        recap = "- 姓名：肖伟众\n以上信息是否准确？如无误请回复“确认”。"
+
+        self.assertTrue(dialog_service._should_commit_recap(
+            "basic_info", recap, "确认"
+        ))
+
+    def test_opening_quote_is_detected_as_truncated(self):
+        partial = "以上信息是否准确？如无误请回复“"
+
+        self.assertTrue(dialog_service._reply_needs_continuation(partial))
+        self.assertFalse(dialog_service._reply_looks_complete(partial))
+
+    def test_unmatched_ascii_quote_is_detected_as_truncated(self):
+        partial = '以上信息是否准确？如无误请回复"'
+
+        self.assertTrue(dialog_service._reply_needs_continuation(partial))
+        self.assertFalse(dialog_service._reply_looks_complete(partial))
+
+    def test_unfinished_function_word_is_detected_as_truncated(self):
+        partial = "之后正式投递时"
+
+        self.assertTrue(dialog_service._reply_needs_continuation(partial))
+        self.assertFalse(dialog_service._reply_looks_complete(partial))
+
+    def test_unfinished_conjunction_is_detected_as_truncated(self):
+        partial = "如果你有特别想去的目标城市，也可以一并"
+
+        self.assertTrue(dialog_service._reply_needs_continuation(partial))
+        self.assertFalse(dialog_service._reply_looks_complete(partial))
+
+    def test_closed_markdown_is_not_treated_as_truncated(self):
+        self.assertFalse(dialog_service._reply_needs_continuation("请确认 **基本信息**"))
+        self.assertTrue(dialog_service._reply_needs_continuation("请确认 **基本信息"))
+
 
 class StageTransitionTests(unittest.IsolatedAsyncioTestCase):
     def make_session(self, extracted):
@@ -234,6 +276,86 @@ class StreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "这段经历可以体现你的独立开发能力。",
         )
 
+    async def test_normal_stop_with_opening_quote_is_continued(self):
+        session = {
+            "session_id": "test-session",
+            "target_job": "产品经理",
+            "messages": [{"role": "user", "content": "补充基本信息"}],
+            "stage": "basic_info",
+            "extracted": {},
+        }
+        store = FakeSessionStore(session)
+
+        async def completed_but_cut_off(*args, **kwargs):
+            yield "以上信息是否准确？如无误请回复“"
+
+        with (
+            patch.object(dialog_service, "session_store", store),
+            patch.object(
+                dialog_service,
+                "prepare_stage_info",
+                AsyncMock(return_value=(session, "basic_info", "system", [])),
+            ),
+            patch.object(dialog_service.llm_service, "chat_stream", completed_but_cut_off),
+            patch.object(
+                dialog_service.llm_service,
+                "chat_complete",
+                AsyncMock(return_value="确认”。"),
+            ),
+        ):
+            events = [
+                (event_name, json.loads(payload))
+                async for event_name, payload in dialog_service.chat_stream(
+                    "test-session", "产品经理", "补充基本信息", 2, "user-1"
+                )
+            ]
+
+        deltas = [payload["text"] for name, payload in events if name == "delta"]
+        self.assertEqual("".join(deltas), "以上信息是否准确？如无误请回复“确认”。")
+        self.assertEqual(events[-1][0], "done")
+        self.assertEqual(
+            session["messages"][-1]["content"],
+            "以上信息是否准确？如无误请回复“确认”。",
+        )
+
+    async def test_normal_stop_on_function_word_is_continued(self):
+        session = {
+            "session_id": "test-session",
+            "target_job": "市场运营",
+            "messages": [{"role": "user", "content": "我想做市场运营"}],
+            "stage": "basic_info",
+            "extracted": {},
+        }
+        store = FakeSessionStore(session)
+
+        async def completed_but_semantically_cut_off(*args, **kwargs):
+            yield "这些信息会帮助你在之后正式投递时"
+
+        with (
+            patch.object(dialog_service, "session_store", store),
+            patch.object(
+                dialog_service,
+                "prepare_stage_info",
+                AsyncMock(return_value=(session, "basic_info", "system", [])),
+            ),
+            patch.object(dialog_service.llm_service, "chat_stream", completed_but_semantically_cut_off),
+            patch.object(
+                dialog_service.llm_service,
+                "chat_complete",
+                AsyncMock(return_value="补充完整简历信息。"),
+            ),
+        ):
+            events = [
+                (event_name, json.loads(payload))
+                async for event_name, payload in dialog_service.chat_stream(
+                    "test-session", "市场运营", "我想做市场运营", 2, "user-1"
+                )
+            ]
+
+        deltas = [payload["text"] for name, payload in events if name == "delta"]
+        self.assertEqual("".join(deltas), "这些信息会帮助你在之后正式投递时补充完整简历信息。")
+        self.assertEqual(events[-1][0], "done")
+
 
 class LLMFinishReasonTests(unittest.TestCase):
     def test_anthropic_length_stop_is_detected(self):
@@ -244,6 +366,84 @@ class LLMFinishReasonTests(unittest.TestCase):
 
         self.assertEqual(reason, "max_tokens")
         self.assertTrue(llm_service._is_length_stop(reason))
+
+
+class StructuredChatResponseTests(unittest.IsolatedAsyncioTestCase):
+    def make_session(self):
+        return {
+            "session_id": "test-session",
+            "target_job": "市场运营",
+            "messages": [{"role": "user", "content": "我想做市场运营"}],
+            "stage": "basic_info",
+            "extracted": {},
+        }
+
+    async def test_structured_response_is_committed_only_after_validation(self):
+        session = self.make_session()
+        store = FakeSessionStore(session)
+        with (
+            patch.object(dialog_service, "session_store", store),
+            patch.object(
+                dialog_service,
+                "prepare_stage_info",
+                AsyncMock(return_value=(session, "basic_info", "system", ["确认"])),
+            ),
+            patch.object(
+                dialog_service.llm_service,
+                "chat_complete",
+                AsyncMock(return_value='{"reply":"请告诉我你的姓名。","complete":true}'),
+            ),
+        ):
+            result = await dialog_service.chat_response(
+                "test-session", "市场运营", "我想做市场运营", 1, "user-1"
+            )
+
+        self.assertEqual(result["reply"], "请告诉我你的姓名。")
+        self.assertTrue(result["complete"])
+        self.assertEqual(session["messages"][-1]["content"], "请告诉我你的姓名。")
+
+    async def test_invalid_json_is_repaired_before_returning(self):
+        session = self.make_session()
+        store = FakeSessionStore(session)
+        complete = AsyncMock(side_effect=[
+            "请告诉我你的姓名",
+            '{"reply":"请告诉我你的姓名。","complete":true}',
+        ])
+        with (
+            patch.object(dialog_service, "session_store", store),
+            patch.object(
+                dialog_service,
+                "prepare_stage_info",
+                AsyncMock(return_value=(session, "basic_info", "system", [])),
+            ),
+            patch.object(dialog_service.llm_service, "chat_complete", complete),
+        ):
+            result = await dialog_service.chat_response(
+                "test-session", "市场运营", "我想做市场运营", 1, "user-1"
+            )
+
+        self.assertEqual(result["reply"], "请告诉我你的姓名。")
+        self.assertEqual(complete.await_count, 2)
+
+    def test_parser_rejects_incomplete_envelope(self):
+        with self.assertRaises(ValueError):
+            dialog_service._parse_chat_response(
+                '{"reply":"请告诉我你的姓名","complete":false}'
+            )
+
+    def test_parser_allows_provider_metadata_fields(self):
+        raw = '{"reply":"请告诉我你的姓名。","complete":true,"usage":{"output_tokens":12}}'
+
+        self.assertEqual(
+            dialog_service._parse_chat_response(raw),
+            "请告诉我你的姓名。",
+        )
+
+    def test_parser_wraps_complete_plain_text_for_compatibility(self):
+        self.assertEqual(
+            dialog_service._parse_chat_response("请告诉我你的姓名。"),
+            "请告诉我你的姓名。",
+        )
 
     def test_openai_finish_reason_is_detected(self):
         reason = llm_service._extract_stop_reason({

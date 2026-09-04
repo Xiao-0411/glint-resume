@@ -1,5 +1,5 @@
 /**
- * 真实后端 API 调用（HTTP + SSE 流式）
+ * 真实后端 API 调用（HTTP + 完整 JSON，前端本地模拟播放）
  * 通过 VITE_API_BASE_URL 指向后端。
  * 生产架构:前端在 Cloudflare Pages(纯静态,无 /api 反代),后端经本机
  * Cloudflare Tunnel 暴露为 api.sgjl.cloud —— 所以生产不能用同源相对路径。
@@ -127,74 +127,7 @@ export async function getLatestSession() {
 }
 
 /**
- * 解析 SSE 事件流（fetch 版本,因为我们要 POST + 流读取）
- * 返回异步迭代器,每次 yield { event, data }
- *
- * 兼容处理:
- *  - sse-starlette 默认使用 \r\n\r\n 作为事件分隔
- *  - 其他实现使用 \n\n
- *  - 部分代理用 \r\r
- *  统一把所有行尾归一为 \n,然后按 \n\n 拆事件
- */
-async function* parseSSEStream(response) {
-  if (!response.body) throw new Error('响应没有 body 流')
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder('utf-8')
-  let buffer = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    // 增量解码并归一化行尾
-    let chunk = decoder.decode(value, { stream: true })
-    chunk = chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-    buffer += chunk
-
-    let sepIdx
-    while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
-      const rawEvent = buffer.slice(0, sepIdx)
-      buffer = buffer.slice(sepIdx + 2)
-
-      let eventName = 'message'
-      let dataLines = []
-      for (const line of rawEvent.split('\n')) {
-        if (!line || line.startsWith(':')) continue   // 跳过注释/keep-alive
-        if (line.startsWith('event:')) eventName = line.slice(6).trim()
-        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
-      }
-      const dataStr = dataLines.join('\n')
-      if (dataStr) {
-        try {
-          yield { event: eventName, data: JSON.parse(dataStr) }
-        } catch {
-          yield { event: eventName, data: dataStr }
-        }
-      }
-    }
-  }
-
-  // 流结束时若还有残余事件,补处理一次
-  if (buffer.trim()) {
-    let eventName = 'message'
-    let dataLines = []
-    for (const line of buffer.split('\n')) {
-      if (!line || line.startsWith(':')) continue
-      if (line.startsWith('event:')) eventName = line.slice(6).trim()
-      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
-    }
-    const dataStr = dataLines.join('\n')
-    if (dataStr) {
-      try {
-        yield { event: eventName, data: JSON.parse(dataStr) }
-      } catch {
-        yield { event: eventName, data: dataStr }
-      }
-    }
-  }
-}
-
-/**
- * 流式对话
+ * 对话请求：后端返回完整 JSON，前端在此函数中模拟流式播放
  * @param {Object} payload - { sessionId, targetJob, userMessage, userMsgCount }
  * @param {Object} handlers - { onDelta(text), onDone(meta), onError(err) }
  */
@@ -220,35 +153,61 @@ export async function sendChatStream(payload, handlers = {}) {
   }
 
   if (!response.ok) {
-    handlers.onError?.(new Error(`后端返回 ${response.status}`))
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = body?.detail || body?.message || ''
+    } catch {
+      // Keep the status-only error when the server did not return JSON.
+    }
+    handlers.onError?.(new Error(detail || `后端返回 ${response.status}`))
     return
   }
 
   try {
-    let terminalEventSeen = false
-    for await (const evt of parseSSEStream(response)) {
-      if (evt.event === 'delta' && evt.data?.text) {
-        handlers.onDelta?.(evt.data.text)
-      } else if (evt.event === 'done') {
-        terminalEventSeen = true
-        handlers.onDone?.({
-          stage: evt.data.stage,
-          stageLabel: evt.data.stage_label,
-          quickReplies: evt.data.quick_replies || [],
-          fallback: !!evt.data.fallback,
-          fallbackReason: evt.data.fallback_reason || '',
-          extracted: evt.data.extracted || null
-        })
-        return
-      } else if (evt.event === 'error') {
-        terminalEventSeen = true
-        handlers.onError?.(new Error(evt.data?.message || '流式错误'))
-        return
+    // The backend returns one validated JSON envelope. Simulate chunks only
+    // after the complete reply has arrived, so no partial text can be shown.
+    const data = await response.json()
+    if (data?.complete !== true || typeof data.reply !== 'string' || !data.reply.trim()) {
+      throw new Error('后端返回的对话格式不完整')
+    }
+    const reply = data.reply.trim()
+    const chunkSize = 4
+    for (let i = 0; i < reply.length; i += chunkSize) {
+      if (payload.signal?.aborted) {
+        const abortError = new Error('请求已取消')
+        abortError.name = 'AbortError'
+        throw abortError
       }
+      handlers.onDelta?.(reply.slice(i, i + chunkSize))
+      await new Promise((resolve, reject) => {
+        const signal = payload.signal
+        let timer
+        const onAbort = () => {
+          if (timer) clearTimeout(timer)
+          const abortError = new Error('请求已取消')
+          abortError.name = 'AbortError'
+          reject(abortError)
+        }
+        if (signal?.aborted) {
+          onAbort()
+          return
+        }
+        if (signal) signal.addEventListener('abort', onAbort, { once: true })
+        timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve()
+        }, 24)
+      })
     }
-    if (!terminalEventSeen) {
-      handlers.onError?.(new Error('流式响应未完整结束，请重试'))
-    }
+    handlers.onDone?.({
+      stage: data.stage,
+      stageLabel: data.stage_label,
+      quickReplies: data.quick_replies || [],
+      fallback: !!data.fallback,
+      fallbackReason: data.fallback_reason || '',
+      extracted: data.extracted || null
+    })
   } catch (e) {
     if (e?.name === 'AbortError') throw e
     handlers.onError?.(e)

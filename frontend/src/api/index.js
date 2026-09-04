@@ -2,7 +2,7 @@
  * 后端 API 封装入口
  *
  * 通过 .env 中 VITE_USE_BACKEND 切换:
- *  - 'true'  → 调用真实后端(端口 8000),对话走 SSE 流式
+ *  - 'true'  → 调用真实后端(端口 8000),后端返回完整 JSON，前端模拟流式
  *  - 否则     → 走 mock.js (前端独立演示)
  */
 import { mockChatReply, mockGenerateResume, mockEvaluateResumeText, mockReevaluateResume } from './mock'
@@ -40,7 +40,7 @@ export const chatApi = {
   send: (payload) => mockChatReply(payload),
 
   /**
-   * 流式调用(真实后端用)
+   * 模拟流式调用（真实后端先返回完整 JSON，再由前端分块播放）
    * payload: { sessionId, targetJob, userMessage, userMsgCount }
    * handlers: { onDelta(text), onDone(meta), onError(err) }
    *

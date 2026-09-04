@@ -71,13 +71,13 @@
         </div>
 
         <footer class="input-footer">
-          <div class="input-row" :class="{ disabled: aiThinking || generating }">
+          <div class="input-row" :class="{ disabled: busy }">
             <textarea
               ref="textareaRef"
               v-model="text"
               class="textarea"
               placeholder="说说你的经历..."
-              :disabled="aiThinking || generating"
+              :disabled="busy"
               rows="1"
               @keydown.enter.exact.prevent="onSend"
               @input="autoGrow"
@@ -122,7 +122,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
-import { chatApi, resumeApi } from '@/api'
+import { chatApi, resumeApi, apiMode } from '@/api'
 import ChatBubble from '@/components/ChatBubble.vue'
 import LoadingOverlay from '@/components/LoadingOverlay.vue'
 import LiveResumePreview from '@/components/LiveResumePreview.vue'
@@ -135,6 +135,9 @@ const chatAreaRef = ref(null)
 const textareaRef = ref(null)
 const text = ref('')
 const aiThinking = ref(false)
+// Keep the composer locked for the whole SSE lifecycle. Once the first token
+// arrives aiThinking is hidden, but the prior request is still in flight.
+const streamingActive = ref(false)
 const generating = ref(false)
 const needLogin = ref(false)
 const currentQuickReplies = ref([])
@@ -147,7 +150,8 @@ const steps = [
   { key: 'skills_awards', label: '技能荣誉' }
 ]
 
-const canSend = computed(() => text.value.trim().length > 0 && !aiThinking.value && !generating.value)
+const busy = computed(() => aiThinking.value || streamingActive.value || generating.value)
+const canSend = computed(() => text.value.trim().length > 0 && !busy.value)
 
 const lastAiIdx = computed(() => {
   for (let i = store.messages.length - 1; i >= 0; i--) {
@@ -156,8 +160,8 @@ const lastAiIdx = computed(() => {
   return -1
 })
 
-// 有真实抽取数据时按数据立即展示，允许用户跨阶段补充内容；尚无真实数据的
-// mock 流程仍按 stage 展示示例排版。
+// 只按后端已确认并提交的结构化数据展示；尚无真实数据的 mock 流程仍按
+// stage 展示示例排版。
 const completedSections = computed(() => {
   const profile = store.extractedProfile || {}
   const skills = profile.skills || {}
@@ -173,6 +177,11 @@ const completedSections = computed(() => {
   ) populated.push('skills')
   if (Array.isArray(profile.awards) && profile.awards.length) populated.push('awards')
   if (populated.length) return populated
+
+  // In real backend mode, an empty snapshot means nothing has been confirmed
+  // yet. Do not unlock sample sections merely because the state machine moved
+  // stages. Mock mode keeps its illustrative layout for offline demos.
+  if (apiMode !== 'mock') return []
 
   const stage = store.currentStage
   if (stage === 'basic_info') return []
@@ -223,13 +232,12 @@ function onQuickReply(text) {
 }
 
 async function sendUserMessage(text) {
-  if (aiThinking.value || generating.value) return
+  if (busy.value) return
 
   store.pushMessage('user', text)
   currentQuickReplies.value = []
-  await scrollToBottom()
-
   aiThinking.value = true
+  streamingActive.value = true
   await scrollToBottom()
 
   let aiIdx = -1
@@ -257,6 +265,7 @@ async function sendUserMessage(text) {
           scrollToBottom()
         },
         onDone: (meta) => {
+          streamingActive.value = false
           store.setStage(meta.stage)
           if (meta.extracted) store.setExtracted(meta.extracted)
           currentQuickReplies.value = meta.quickReplies || []
@@ -279,6 +288,7 @@ async function sendUserMessage(text) {
           }
         },
         onError: (err) => {
+          streamingActive.value = false
           aiThinking.value = false
           if (aiIdx === -1) {
             store.pushMessage('ai', `抱歉，出了点问题：${err.message || '请稍后重试'}`)
@@ -292,6 +302,8 @@ async function sendUserMessage(text) {
   } catch (error) {
     if (error?.name !== 'AbortError') throw error
   } finally {
+    streamingActive.value = false
+    aiThinking.value = false
     streamController = null
   }
   await scrollToBottom()

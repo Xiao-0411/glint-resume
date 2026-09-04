@@ -160,6 +160,15 @@ async def chat_complete(
     data = resp.json()
     content_blocks = data.get("content", [])
     text_parts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
+    if not text_parts and isinstance(data.get("choices"), list) and data["choices"]:
+        choice = data["choices"][0] or {}
+        message = choice.get("message") or {}
+        delta = choice.get("delta") or {}
+        text = message.get("content") or delta.get("content") or delta.get("text") or ""
+        if text:
+            text_parts = [text]
+    if not text_parts and isinstance(data.get("completion"), str):
+        text_parts = [data.get("completion", "")]
     text = "".join(text_parts).strip()
     usage = _extract_usage(data)
     prompt_tokens = usage.get("prompt_tokens") or estimated_prompt_tokens
@@ -279,9 +288,26 @@ async def chat_stream(
                                     delta = data.get("delta", {})
                                     if delta.get("type") == "text_delta":
                                         text = delta.get("text", "")
-                                        if text:
+                                        if isinstance(text, str) and text:
                                             text_parts.append(text)
                                             yield text
+                                # Some gateways accept the Anthropic endpoint
+                                # but still emit OpenAI-compatible chunks.
+                                # Normalize choices[].delta.content here so a
+                                # provider format mismatch cannot look like a
+                                # frozen or empty response in the UI.
+                                elif isinstance(data.get("choices"), list):
+                                    choice = data["choices"][0] if data["choices"] else {}
+                                    delta = choice.get("delta") or {}
+                                    text = delta.get("content") or delta.get("text") or ""
+                                    if isinstance(text, str) and text:
+                                        text_parts.append(text)
+                                        yield text
+                                elif isinstance(data.get("completion"), str):
+                                    text = data.get("completion", "")
+                                    if text:
+                                        text_parts.append(text)
+                                        yield text
                                 # 错误事件
                                 elif event_type == "error":
                                     err = data.get("error", {})
@@ -332,12 +358,27 @@ async def chat_stream(
                         completed = True
             except httpx.RequestError as e:
                 message = f"网络错误: {e}"
-                # 已经吐字了就不能重来,直接报错让上层兜底
-                if is_last or text_parts or not _is_retryable_request_error(e):
+                # 已经吐字后不能从头重试，否则用户会看到重复内容；把已
+                # 输出的正文交给上层续写，网络/读取中断也能自动补齐。
+                if text_parts:
+                    partial_text = "".join(text_parts)
                     _record_usage(
                         payload=payload,
                         prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens("".join(text_parts)),
+                        completion_tokens=completion_tokens or llm_usage_service.estimate_text_tokens(partial_text),
+                        status="error",
+                        error_message=message,
+                    )
+                    raise LLMStreamIncomplete(
+                        f"LLM 流式输出中断: {message}",
+                        reason="transport_interrupted",
+                        partial_text=partial_text,
+                    )
+                if is_last or not _is_retryable_request_error(e):
+                    _record_usage(
+                        payload=payload,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
                         status="error",
                         error_message=message,
                     )

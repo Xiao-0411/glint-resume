@@ -156,7 +156,7 @@
           </svg>
         </div>
         <div class="awaiting-title">简历还是空白的</div>
-        <div class="awaiting-desc">从左侧开始对话，每完成一项就会自动写入这里</div>
+        <div class="awaiting-desc">从左侧开始对话，每确认一项就会写入这里</div>
       </div>
     </div>
   </div>
@@ -229,7 +229,7 @@ function mapProfile(p) {
 
 // 真实模式渲染真实数据;否则(mock 模式)回落到样例排版
 const displayResume = computed(() => hasReal.value ? mapProfile(props.profile) : buildMockResume(props.targetJob))
-const previewLabel = computed(() => hasReal.value ? '实时预览 · 随对话自动填充' : '排版预览 · 示例')
+const previewLabel = computed(() => hasReal.value ? '实时预览 · 仅展示已确认信息' : '排版预览 · 示例')
 
 function has(key) {
   return props.completedSections.includes(key)

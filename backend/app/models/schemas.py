@@ -1,7 +1,7 @@
 """
 Pydantic 数据模型 —— 所有前后端交互的请求/响应结构
 """
-from typing import Optional, List, Dict, Any, Annotated
+from typing import Optional, List, Dict, Any, Annotated, Literal
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -104,6 +104,18 @@ class ChatResponseMeta(BaseModel):
     stage_label: str = Field("", description="阶段中文标签")
     quick_replies: List[str] = Field(default_factory=list)
     extracted_info: Optional[Dict[str, Any]] = None
+
+
+class ChatCompleteResponse(BaseModel):
+    """Validated non-streaming chat envelope returned to the frontend."""
+    reply: str = Field(..., min_length=1)
+    complete: Literal[True] = True
+    stage: str
+    stage_label: str = ""
+    quick_replies: List[str] = Field(default_factory=list)
+    extracted: Dict[str, Any] = Field(default_factory=dict)
+    fallback: bool = False
+    fallback_reason: str = ""
 
 
 # ============ Resume ============

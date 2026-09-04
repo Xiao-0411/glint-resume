@@ -148,6 +148,10 @@ RECAP_STAGE_SIGNALS = {
     "skills": ["技能清单", "专业技能", "技术栈", "工具", "软技能"],
 }
 
+# These function words are strong evidence that a response stopped mid-sentence
+# even when the provider reported a normal end-turn.
+INCOMPLETE_TRAILING_CHARS = "时后前中内上下和与及或但而因果如果当将把是为在从对向给让请如的地得并以及同时"
+
 
 def _clean_user_message(message: str) -> str:
     return (message or "").strip().rstrip("。！？,.!?")
@@ -172,6 +176,21 @@ def _is_confirmation_only(message: str) -> bool:
     return len(clean_msg) <= 18 and _is_no_more_experience(clean_msg)
 
 
+def _should_commit_recap(
+    current_stage: str,
+    last_assistant_msg: str,
+    user_message: str,
+) -> bool:
+    """Return whether the user explicitly confirmed the previous recap."""
+    if not last_assistant_msg or not any(
+        signal in last_assistant_msg for signal in RECAP_SIGNALS
+    ):
+        return False
+    return _is_confirmation_only(user_message) or (
+        current_stage == "experience_mining" and _is_no_more_experience(user_message)
+    )
+
+
 def _infer_extraction_stage(current_stage: str, recap: str) -> str:
     """按 recap 的实际内容选择抽取器，容忍前端阶段暂时落后于用户话题。"""
     text = (recap or "").lower()
@@ -192,7 +211,95 @@ def _reply_looks_complete(text: str) -> bool:
     stripped = (text or "").rstrip()
     if not stripped:
         return False
-    return stripped[-1] in "。！？.!?；;：:)）】]」』'\""
+    # An opening quote/bracket is evidence of a cut-off sentence.  The old
+    # check treated the opening Chinese quote in ``请回复“`` as a terminator.
+    if stripped[-1] in "“「『（([{《〈<":
+        return False
+    if stripped.endswith('"') and stripped.count('"') % 2:
+        return False
+    if stripped.count("“") != stripped.count("”"):
+        return False
+    if stripped.endswith(("回复", "请", "是否", "如无误", "需要补充", "需要修改")):
+        return False
+    if stripped.endswith(("，", ",", "、", "：", ":", "；", ";")):
+        return False
+    return stripped[-1] in "。！？.!?)]}）】」』’”\""
+
+
+def _reply_needs_continuation(text: str) -> bool:
+    """Detect semantic truncation even when the provider reports normal stop."""
+    stripped = (text or "").rstrip()
+    if not stripped:
+        return False
+    if stripped.endswith(("回复", "请回复", "请回复“", "请回复\"", "如无误请回复")):
+        return True
+    if stripped[-1] in "“「『（([{《〈<":
+        return True
+    if stripped.count('"') % 2:
+        return True
+    if stripped.count("“") != stripped.count("”"):
+        return True
+    if stripped[-1] in INCOMPLETE_TRAILING_CHARS:
+        return True
+    if stripped.count("```") % 2:
+        return True
+    if stripped.count("**") % 2:
+        return True
+    return False
+
+
+CHAT_RESPONSE_FORMAT = """
+# 机器可读输出协议（必须遵守）
+本轮只能输出一个 JSON 对象，禁止输出 Markdown 代码围栏、解释文字或 JSON 之外的任何字符。
+格式必须严格为：{"reply":"完整的 AI 回复正文","complete":true}
+- reply 必须是面向用户的完整中文回复，保留原本需要的 Markdown（如 **加粗** 和换行的转义形式）。
+- complete 只能是布尔值 true；如果内容还没写完，必须继续生成，不能返回半句话或 complete:false。
+- reply 必须以完整句子、完整列表和闭合的 Markdown/引号结束。
+""".strip()
+
+
+def _parse_chat_response(raw: str) -> str:
+    """Parse and validate the model's enforced JSON response envelope."""
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("响应为空")
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        # Some gateways add a short preamble despite the instruction. Extract
+        # only the outer JSON object, then validate it exactly as usual.
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            # Compatibility path for gateways that ignore the JSON envelope
+            # but still return a complete plain-text answer.
+            if _reply_looks_complete(text) and not _reply_needs_continuation(text):
+                return text
+            raise ValueError("响应不是有效 JSON")
+        try:
+            payload = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError("响应 JSON 无法解析") from exc
+    if isinstance(payload, dict) and "reply" in payload:
+        # Providers may add usage/stage metadata around the required fields;
+        # the envelope is valid as long as its required values are correct.
+        if payload.get("complete") is not True:
+            raise ValueError("响应未标记为完整")
+        reply = payload.get("reply")
+    else:
+        reply = None
+    if (
+        not isinstance(payload, dict)
+        or reply is None
+    ):
+        raise ValueError("响应未标记为完整")
+    if not isinstance(reply, str) or not reply.strip():
+        raise ValueError("响应缺少 reply 正文")
+    reply = reply.strip()
+    if _reply_needs_continuation(reply):
+        raise ValueError("reply 仍然以未完成内容结尾")
+    return reply
 
 
 def _trim_continuation_overlap(existing: str, continuation: str) -> str:
@@ -231,6 +338,35 @@ async def _continue_incomplete_reply(
         timeout=settings.LLM_TIMEOUT_FAST_SECONDS,
     )
     return _trim_continuation_overlap(partial_reply, continuation)
+
+
+async def _recover_reply_tail(
+    messages: List[Dict],
+    system_prompt: str,
+    partial_reply: str,
+    *,
+    force_first: bool = False,
+    max_rounds: int = 2,
+) -> Tuple[str, List[str]]:
+    """Continue a cut-off reply, allowing one further pass if still open."""
+    current = partial_reply
+    continuations: List[str] = []
+    for round_index in range(max_rounds):
+        if round_index > 0 or not force_first:
+            if not _reply_needs_continuation(current):
+                break
+        continuation = await _continue_incomplete_reply(
+            messages, system_prompt, current
+        )
+        if not continuation:
+            if round_index == 0:
+                raise llm_service.LLMError("回复续写为空")
+            break
+        continuations.append(continuation)
+        current = (current + continuation).strip()
+    if _reply_needs_continuation(current):
+        raise llm_service.LLMError("回复续写后仍未完整结束")
+    return current, continuations
 
 
 def _has_value(value) -> bool:
@@ -364,6 +500,7 @@ async def prepare_stage_info(
     user_message: str,
     user_msg_count: int,
     user_id: Optional[str] = None,
+    commit_recap: bool = False,
 ) -> Tuple[Dict, str, str, List[str]]:
     """
     在 LLM 主回复前,先确定下一阶段,组装 system prompt
@@ -378,6 +515,19 @@ async def prepare_stage_info(
     _store_append(session_id, "user", user_message, user_id)
 
     current_stage = session.get("stage", "basic_info")
+
+    # AI 的 recap 是待确认草稿，不能在生成 recap 的同一轮写入右侧简历。
+    # 只有下一轮用户明确确认时，才把上一条 recap 提取为结构化数据。
+    # commit_recap 默认关闭，保留给只做阶段判断的调用方和单元测试。
+    recap_committed = False
+    if (
+        commit_recap
+        and _should_commit_recap(current_stage, last_assistant, user_message)
+    ):
+        await _incremental_extract(session_id, current_stage, last_assistant, user_id)
+        session = _store_get(session_id, user_id) or session
+        recap_committed = True
+
     current_gaps = _stage_gaps(current_stage, session.get("extracted", {}))
     blocked_gaps: List[str] = []
     experience_confirmed = False
@@ -389,6 +539,23 @@ async def prepare_stage_info(
     else:
         advance = await _judge_should_advance(current_stage, last_assistant, user_message)
         force_advance = _is_force_advance(user_message)
+
+        # The lightweight judge also accepts natural confirmations such as
+        # "好的，以上都没问题". Commit the recap after that verdict, before
+        # applying the quality gate, so those confirmations behave like the
+        # one-word quick reply without ever committing unconfirmed content.
+        if (
+            advance
+            and commit_recap
+            and not recap_committed
+            and not force_advance
+            and last_assistant
+            and any(signal in last_assistant for signal in RECAP_SIGNALS)
+        ):
+            await _incremental_extract(session_id, current_stage, last_assistant, user_id)
+            session = _store_get(session_id, user_id) or session
+            current_gaps = _stage_gaps(current_stage, session.get("extracted", {}))
+
         if advance and current_gaps and not force_advance:
             next_stage = current_stage
             advanced = False
@@ -463,7 +630,11 @@ async def chat_stream(
     user_msg_count: int,
     user_id: Optional[str] = None,
 ) -> AsyncGenerator[Tuple[str, str], None]:
-    """
+    """Legacy SSE generator kept for internal compatibility tests.
+
+    The HTTP chat endpoint uses :func:`chat_response`; this function is no
+    longer on the browser request path.
+
     流式生成 AI 回复
     yield (event_type, payload_json):
       - ('delta', '{"text": "片段"}')
@@ -471,7 +642,8 @@ async def chat_stream(
       - ('error', '{"message": "..."}')
     """
     session, next_stage, system_prompt, quick_replies = await prepare_stage_info(
-        session_id, target_job, user_message, user_msg_count, user_id
+        session_id, target_job, user_message, user_msg_count, user_id,
+        commit_recap=True,
     )
 
     messages = _build_messages_for_llm(session)
@@ -496,25 +668,27 @@ async def chat_stream(
             })
         elif partial_reply:
             try:
-                continuation = await _continue_incomplete_reply(
-                    messages, system_prompt, partial_reply
+                _, continuations = await _recover_reply_tail(
+                    messages, system_prompt, partial_reply,
+                    force_first=True,
                 )
             except llm_service.LLMError as continuation_error:
                 yield ("error", json.dumps({
                     "message": f"回复续写失败: {continuation_error}"
                 }, ensure_ascii=False))
                 return
-            if not continuation:
+            if not continuations:
                 yield ("error", json.dumps({
                     "message": "回复在中途结束，且未能补全"
                 }, ensure_ascii=False))
                 return
-            full_reply_parts.append(continuation)
-            yield ("delta", json.dumps({"text": continuation}, ensure_ascii=False))
+            for continuation in continuations:
+                full_reply_parts.append(continuation)
+                yield ("delta", json.dumps({"text": continuation}, ensure_ascii=False))
             logger.warning("chat_stream_continued", extra={
                 "stage": next_stage,
                 "reason": e.reason,
-                "continuation_len": len(continuation),
+                "continuation_len": sum(len(part) for part in continuations),
             })
         else:
             yield ("error", json.dumps({"message": str(e)}, ensure_ascii=False))
@@ -524,19 +698,36 @@ async def chat_stream(
         return
 
     full_reply = "".join(full_reply_parts).strip()
+
+    # A few Anthropic-compatible gateways emit a normal end-turn even when
+    # the model stopped on an opening quote or an unfinished confirmation
+    # phrase. Complete that tail before exposing the done event to the client.
+    if _reply_needs_continuation(full_reply):
+        try:
+            recovered_reply, continuations = await _recover_reply_tail(
+                messages, system_prompt, full_reply,
+            )
+        except llm_service.LLMError as continuation_error:
+            yield ("error", json.dumps({
+                "message": f"回复续写失败: {continuation_error}"
+            }, ensure_ascii=False))
+            return
+        if continuations:
+            full_reply = recovered_reply
+            for continuation in continuations:
+                full_reply_parts.append(continuation)
+                yield ("delta", json.dumps({"text": continuation}, ensure_ascii=False))
+
     _store_append(session_id, "assistant", full_reply, user_id)
 
-    # ⚠️ 增量提取:如果 AI 刚做完 recap(包含确认信号),尝试提取该阶段数据
+    # 仅记录 recap，结构化提取会在下一轮用户明确确认时执行。
     has_recap = any(s in full_reply for s in RECAP_SIGNALS)
     logger.info("chat_stream_done", extra={
         "stage": next_stage,
         "has_recap": has_recap,
         "reply_len": len(full_reply),
     })
-    if has_recap:
-        await _incremental_extract(session_id, next_stage, full_reply, user_id)
-
-    # 把当前已增量抽取的结构化数据一并下发,供前端右侧"实时预览"渲染真实内容
+    # 把当前已确认并提交的结构化数据一并下发，未确认 recap 不会出现在右侧预览。
     extracted_snapshot = _store_get(session_id, user_id)
     extracted = extracted_snapshot.get("extracted", {}) if extracted_snapshot else {}
 
@@ -549,6 +740,108 @@ async def chat_stream(
             "extracted": extracted
         }, ensure_ascii=False)
     )
+
+
+async def chat_response(
+    session_id: str,
+    target_job: str,
+    user_message: str,
+    user_msg_count: int,
+    user_id: Optional[str] = None,
+) -> Dict:
+    """Generate one complete, validated chat response (non-streaming)."""
+    session, next_stage, system_prompt, quick_replies = await prepare_stage_info(
+        session_id, target_job, user_message, user_msg_count, user_id,
+        commit_recap=True,
+    )
+    messages = _build_messages_for_llm(session)
+    structured_system = f"{system_prompt}\n\n{CHAT_RESPONSE_FORMAT}"
+    raw = ""
+    parse_error = ""
+    # A second pass repairs gateways/models that ignore the JSON-only contract.
+    for attempt in range(2):
+        try:
+            if attempt == 0:
+                request_messages = messages
+            else:
+                request_messages = [
+                    *messages,
+                    {"role": "assistant", "content": raw},
+                    {
+                        "role": "user",
+                        "content": (
+                            "请把上一条内容改成严格符合机器可读输出协议的 JSON。"
+                            "只输出一个对象，reply 必须是完整正文，complete 必须为 true。"
+                        ),
+                    },
+                ]
+            raw = await llm_service.chat_complete(
+                request_messages,
+                system=structured_system,
+                max_tokens=settings.LLM_CHAT_MAX_TOKENS,
+                model=settings.LLM_MODEL_FAST,
+                timeout=settings.LLM_TIMEOUT_FAST_SECONDS,
+            )
+            reply = _parse_chat_response(raw)
+            _store_append(session_id, "assistant", reply, user_id)
+            extracted_snapshot = _store_get(session_id, user_id)
+            extracted = extracted_snapshot.get("extracted", {}) if extracted_snapshot else {}
+            logger.info("chat_response_done", extra={
+                "stage": next_stage,
+                "reply_len": len(reply),
+                "format_attempt": attempt + 1,
+            })
+            return {
+                "reply": reply,
+                "complete": True,
+                "stage": next_stage,
+                "stage_label": STAGE_LABELS.get(next_stage, ""),
+                "quick_replies": quick_replies,
+                "extracted": extracted,
+            }
+        except ValueError as exc:
+            parse_error = str(exc)
+            logger.warning("chat_response_invalid_format", extra={
+                "attempt": attempt + 1,
+                "error": parse_error,
+            })
+        except llm_service.LLMStreamIncomplete as exc:
+            parse_error = str(exc)
+            # Some gateways report ``max_tokens`` even when the payload already
+            # contains a complete JSON envelope.  Validate the captured text
+            # before replacing an otherwise usable answer with mock content.
+            partial = (exc.partial_text or "").strip()
+            if partial:
+                raw = partial
+                try:
+                    reply = _parse_chat_response(partial)
+                except ValueError:
+                    reply = None
+                if reply:
+                    _store_append(session_id, "assistant", reply, user_id)
+                    extracted_snapshot = _store_get(session_id, user_id)
+                    extracted = extracted_snapshot.get("extracted", {}) if extracted_snapshot else {}
+                    logger.info("chat_response_done", extra={
+                        "stage": next_stage,
+                        "reply_len": len(reply),
+                        "format_attempt": attempt + 1,
+                        "accepted_length_stop": True,
+                    })
+                    return {
+                        "reply": reply,
+                        "complete": True,
+                        "stage": next_stage,
+                        "stage_label": STAGE_LABELS.get(next_stage, ""),
+                        "quick_replies": quick_replies,
+                        "extracted": extracted,
+                    }
+            logger.warning("chat_response_truncated", extra={
+                "attempt": attempt + 1,
+                "reason": exc.reason,
+            })
+        except llm_service.LLMError:
+            raise
+    raise llm_service.LLMError(f"AI 返回格式不完整，无法安全显示：{parse_error or '未知格式错误'}")
 
 
 async def extract_profile(session_id: str, user_id: Optional[str] = None) -> Dict:

@@ -24,7 +24,10 @@ class Settings:
     # 单次请求超时：pro 实测单次 70~115s（网关较慢），给到 180s 避免正常请求被误杀；
     # 前端 240s 超时，留出兜底与响应回传的余量。
     LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
-    LLM_TIMEOUT_FAST_SECONDS: float = float(os.getenv("LLM_TIMEOUT_FAST_SECONDS", "45"))
+    # The configured gateway commonly needs 70-115s for a complete chat
+    # response.  A 45s timeout made healthy requests fall through to the mock
+    # response, which then appeared as an unnecessary fallback bubble.
+    LLM_TIMEOUT_FAST_SECONDS: float = float(os.getenv("LLM_TIMEOUT_FAST_SECONDS", "180"))
     # 网关偶发 5xx/超时，重试一次即可救回大部分请求
     LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
     LLM_USAGE_ENABLED: bool = os.getenv("LLM_USAGE_ENABLED", "true").lower() == "true"
