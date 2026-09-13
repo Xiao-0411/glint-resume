@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 
 from app.core.prompts import STAR_L_REWRITE_PROMPT, UPLOAD_RESUME_EVAL_PROMPT
 from app.services import llm_service
+from app.services import resume_sections
 from app.services.dialog_service import extract_profile, _strip_code_fence
 from app.mock.fallback import mock_resume, mock_quality_report
 
@@ -32,6 +33,10 @@ async def generate_resume_from_session(
     from app.store.db_store import session_store
     session = session_store.get(session_id, user_id)
     extracted = session.get("extracted", {}) if session else {}
+    # 对话中用户调整过的板块顺序随简历一起保存,预览和 PDF 都按它排版。
+    section_order = resume_sections.normalize_progress(
+        session.get("progress") if session else None
+    )["order"]
 
     if extracted and (extracted.get("fullname") or extracted.get("education") or extracted.get("experiences")):
         logger.info("generate_resume_use_extracted", extra={"keys": list(extracted.keys())})
@@ -65,7 +70,7 @@ async def generate_resume_from_session(
         profile = await extract_profile(session_id, user_id)
         if not profile:
             logger.warning("generate_resume_empty_profile")
-            return _empty_resume(target_job)
+            return _empty_resume(target_job, section_order)
 
     logger.info("generate_resume_profile_ready", extra={"keys": list(profile.keys())})
     resume = {
@@ -80,7 +85,8 @@ async def generate_resume_from_session(
         "experiences": await _rewrite_experiences(profile.get("experiences", [])),
         "skills": _normalize_skills(profile.get("skills", {})),
         "awards": profile.get("awards", []),
-        "self_evaluation": profile.get("self_evaluation") or _build_self_eval(profile)
+        "self_evaluation": profile.get("self_evaluation") or _build_self_eval(profile),
+        "section_order": section_order,
     }
     logger.info("generate_resume_done", extra={
         "fullname": resume["basic"]["fullname"],
@@ -89,7 +95,7 @@ async def generate_resume_from_session(
     return resume
 
 
-def _empty_resume(target_job: str) -> Dict:
+def _empty_resume(target_job: str, section_order: Optional[List[str]] = None) -> Dict:
     return {
         "basic": {
             "fullname": "",
@@ -102,7 +108,8 @@ def _empty_resume(target_job: str) -> Dict:
         "experiences": [],
         "skills": {"technical": [], "product": [], "soft": []},
         "awards": [],
-        "self_evaluation": "暂未生成自我评价。"
+        "self_evaluation": "暂未生成自我评价。",
+        "section_order": resume_sections.normalize_section_order(section_order),
     }
 
 

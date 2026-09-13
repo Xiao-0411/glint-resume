@@ -71,6 +71,12 @@ def _ensure_schema_updates():
         if "avatar" not in user_columns:
             conn.execute(text("ALTER TABLE users ADD COLUMN avatar VARCHAR(512) NULL"))
 
+    if "sessions" in inspector.get_table_names():
+        session_columns = {column["name"] for column in inspector.get_columns("sessions")}
+        with engine.begin() as conn:
+            if "progress" not in session_columns:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN progress JSON NULL"))
+
     _ensure_super_admin()
 
 

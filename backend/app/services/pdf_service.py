@@ -10,6 +10,8 @@ import logging
 import os
 from typing import Optional
 
+from app.services import resume_sections
+
 logger = logging.getLogger("glint.pdf")
 
 
@@ -111,15 +113,7 @@ RESUME_HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-{education_section}
-
-{experience_section}
-
-{skills_section}
-
-{awards_section}
-
-{self_eval_section}
+{body_sections}
 
 </body>
 </html>"""
@@ -261,15 +255,24 @@ def build_resume_html(resume: dict) -> str:
     fullname = _escape_html(basic.get("fullname") or "未命名")
     target_job = _escape_html(basic.get("target_job") or "未指定岗位")
 
+    # 正文板块按用户调整过的顺序输出;未设置时沿用默认顺序。
+    builders = {
+        "education": lambda: _build_education(resume.get("education") or []),
+        "experience_mining": lambda: _build_experiences(resume.get("experiences") or []),
+        "skills": lambda: _build_skills(resume.get("skills") or {}),
+        "awards": lambda: _build_awards(resume.get("awards") or []),
+        "self_evaluation": lambda: _build_self_eval(resume.get("self_evaluation") or ""),
+    }
+    order = resume_sections.normalize_section_order(resume.get("section_order"))
+    body_sections = "\n\n".join(
+        html for html in (builders[key]() for key in order if key in builders) if html
+    )
+
     return RESUME_HTML_TEMPLATE.format(
         fullname=fullname or "未命名",
         target_job=target_job or "未指定岗位",
         contact_line=_build_contact_line(basic),
-        education_section=_build_education(resume.get("education") or []),
-        experience_section=_build_experiences(resume.get("experiences") or []),
-        skills_section=_build_skills(resume.get("skills") or {}),
-        awards_section=_build_awards(resume.get("awards") or []),
-        self_eval_section=_build_self_eval(resume.get("self_evaluation") or ""),
+        body_sections=body_sections,
     )
 
 

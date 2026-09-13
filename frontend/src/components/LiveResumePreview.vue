@@ -47,103 +47,106 @@
         </div>
       </header>
 
-      <!-- 教育背景 -->
-      <transition name="section-reveal">
-        <section v-if="has('education')" class="resume-section">
-          <h2 class="section-title">
-            <span class="title-bar"></span>
-            <span>教育背景</span>
-          </h2>
-          <div class="edu-list">
-            <div v-for="(edu, i) in displayResume.education" :key="i" class="edu-item">
-              <div class="edu-row">
-                <span class="edu-school">{{ edu.school }}</span>
-                <span class="edu-period">{{ edu.period }}</span>
-              </div>
-              <div class="edu-row sub">
-                <span>{{ edu.major }} · {{ edu.degree }}</span>
-                <span v-if="edu.gpa">GPA: {{ edu.gpa }}</span>
-              </div>
-              <ul v-if="edu.highlights && edu.highlights.length" class="edu-highlights">
-                <li v-for="(h, j) in edu.highlights" :key="j">{{ h }}</li>
-              </ul>
-            </div>
-          </div>
-        </section>
-      </transition>
+      <!-- 正文板块：按用户调整的顺序渲染，每块可上移/下移 -->
+      <template v-for="(key, idx) in visibleOrder" :key="key">
+        <transition name="section-reveal" appear>
+          <section class="resume-section" :class="{ reorderable }">
+            <h2 class="section-title">
+              <span class="title-bar"></span>
+              <span>{{ SECTION_LABELS[key] }}</span>
+              <span v-if="reorderable" class="section-tools">
+                <button
+                  type="button"
+                  class="move-btn"
+                  :disabled="idx === 0"
+                  title="上移这个板块"
+                  @click="$emit('move-section', { key, direction: 'up' })"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="move-btn"
+                  :disabled="idx === visibleOrder.length - 1"
+                  title="下移这个板块"
+                  @click="$emit('move-section', { key, direction: 'down' })"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+              </span>
+            </h2>
 
-      <!-- 项目经历 -->
-      <transition name="section-reveal">
-        <section v-if="has('experiences')" class="resume-section">
-          <h2 class="section-title">
-            <span class="title-bar"></span>
-            <span>项目经历</span>
-          </h2>
-          <div class="exp-list">
-            <div v-for="(exp, i) in displayResume.experiences" :key="exp.id || i" class="exp-item">
-              <div class="exp-head">
-                <div class="exp-title-wrap">
-                  <span class="exp-title">{{ exp.title }}</span>
-                  <span class="exp-role">| {{ exp.role }}</span>
+            <!-- 教育背景 -->
+            <div v-if="key === 'education'" class="edu-list">
+              <div v-for="(edu, i) in displayResume.education" :key="i" class="edu-item">
+                <div class="edu-row">
+                  <span class="edu-school">{{ edu.school }}</span>
+                  <span class="edu-period">{{ edu.period }}</span>
                 </div>
-                <span class="exp-period">{{ exp.period }}</span>
+                <div class="edu-row sub">
+                  <span>{{ edu.major }} · {{ edu.degree }}</span>
+                  <span v-if="edu.gpa">GPA: {{ edu.gpa }}</span>
+                </div>
+                <ul v-if="edu.highlights && edu.highlights.length" class="edu-highlights">
+                  <li v-for="(h, j) in edu.highlights" :key="j">{{ h }}</li>
+                </ul>
               </div>
-              <ul class="exp-bullets">
-                <li v-for="(b, j) in exp.bullets" :key="j">{{ b }}</li>
-              </ul>
             </div>
-          </div>
-        </section>
-      </transition>
 
-      <!-- 技能 -->
-      <transition name="section-reveal">
-        <section v-if="has('skills')" class="resume-section">
-          <h2 class="section-title">
-            <span class="title-bar"></span>
-            <span>专业技能</span>
-          </h2>
-          <div class="skill-grid">
-            <div class="skill-row">
-              <span class="skill-label">技术栈</span>
-              <div class="skill-chips">
-                <span v-for="s in displayResume.skills.technical" :key="s" class="chip">{{ s }}</span>
+            <!-- 项目经历 -->
+            <div v-else-if="key === 'experience_mining'" class="exp-list">
+              <div v-for="(exp, i) in displayResume.experiences" :key="exp.id || i" class="exp-item">
+                <div class="exp-head">
+                  <div class="exp-title-wrap">
+                    <span class="exp-title">{{ exp.title }}</span>
+                    <span class="exp-role">| {{ exp.role }}</span>
+                  </div>
+                  <span class="exp-period">{{ exp.period }}</span>
+                </div>
+                <ul class="exp-bullets">
+                  <li v-for="(b, j) in exp.bullets" :key="j">{{ b }}</li>
+                </ul>
               </div>
             </div>
-            <div v-if="displayResume.skills.tools.length" class="skill-row">
-              <span class="skill-label">工具</span>
-              <div class="skill-chips">
-                <span v-for="s in displayResume.skills.tools" :key="s" class="chip">{{ s }}</span>
-              </div>
-            </div>
-            <div class="skill-row">
-              <span class="skill-label">产品能力</span>
-              <div class="skill-chips">
-                <span v-for="s in displayResume.skills.product" :key="s" class="chip">{{ s }}</span>
-              </div>
-            </div>
-            <div class="skill-row">
-              <span class="skill-label">软技能</span>
-              <div class="skill-chips">
-                <span v-for="s in displayResume.skills.soft" :key="s" class="chip">{{ s }}</span>
-              </div>
-            </div>
-          </div>
-        </section>
-      </transition>
 
-      <!-- 获奖 -->
-      <transition name="section-reveal">
-        <section v-if="has('awards') && displayResume.awards && displayResume.awards.length" class="resume-section">
-          <h2 class="section-title">
-            <span class="title-bar"></span>
-            <span>获奖荣誉</span>
-          </h2>
-          <ul class="award-list">
-            <li v-for="(a, i) in displayResume.awards" :key="i">{{ a }}</li>
-          </ul>
-        </section>
-      </transition>
+            <!-- 技能 -->
+            <div v-else-if="key === 'skills'" class="skill-grid">
+              <div class="skill-row">
+                <span class="skill-label">技术栈</span>
+                <div class="skill-chips">
+                  <span v-for="s in displayResume.skills.technical" :key="s" class="chip">{{ s }}</span>
+                </div>
+              </div>
+              <div v-if="displayResume.skills.tools.length" class="skill-row">
+                <span class="skill-label">工具</span>
+                <div class="skill-chips">
+                  <span v-for="s in displayResume.skills.tools" :key="s" class="chip">{{ s }}</span>
+                </div>
+              </div>
+              <div class="skill-row">
+                <span class="skill-label">产品能力</span>
+                <div class="skill-chips">
+                  <span v-for="s in displayResume.skills.product" :key="s" class="chip">{{ s }}</span>
+                </div>
+              </div>
+              <div class="skill-row">
+                <span class="skill-label">软技能</span>
+                <div class="skill-chips">
+                  <span v-for="s in displayResume.skills.soft" :key="s" class="chip">{{ s }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 获奖 -->
+            <ul v-else-if="key === 'awards'" class="award-list">
+              <li v-for="(a, i) in displayResume.awards" :key="i">{{ a }}</li>
+            </ul>
+
+            <!-- 自我评价 -->
+            <p v-else-if="key === 'self_evaluation'" class="self-eval">{{ displayResume.self_evaluation }}</p>
+          </section>
+        </transition>
+      </template>
 
       <!-- 空状态：所有 section 都未解锁时 -->
       <div v-if="completedCount === 0" class="awaiting">
@@ -156,7 +159,7 @@
           </svg>
         </div>
         <div class="awaiting-title">简历还是空白的</div>
-        <div class="awaiting-desc">从左侧开始对话，每确认一项就会写入这里</div>
+        <div class="awaiting-desc">在左侧选一个板块开始，每确认一块就会写入这里；板块顺序可以随时调整</div>
       </div>
     </div>
   </div>
@@ -165,13 +168,29 @@
 <script setup>
 import { computed } from 'vue'
 import { buildMockResume } from '@/api/mock'
+import { SECTION_LABELS, normalizeSectionOrder } from '@/content/resumeSections'
 
 const props = defineProps({
   targetJob: { type: String, default: '' },
   completedSections: { type: Array, default: () => [] },
   // 后端实时下发的真实抽取数据;mock 模式下为空对象 → 回落到样例排版
-  profile: { type: Object, default: () => ({}) }
+  profile: { type: Object, default: () => ({}) },
+  // 正文板块顺序(板块 key);基本信息固定在页眉
+  sectionOrder: { type: Array, default: () => [] },
+  // 是否显示上移/下移按钮
+  reorderable: { type: Boolean, default: false }
 })
+
+defineEmits(['move-section'])
+
+// 预览 section 名 → 板块 key
+const PREVIEW_TO_KEY = {
+  education: 'education',
+  experiences: 'experience_mining',
+  skills: 'skills',
+  awards: 'awards',
+  self_evaluation: 'self_evaluation'
+}
 
 // 是否拿到了后端真实数据(任一关键字段非空)
 const hasReal = computed(() => {
@@ -188,7 +207,8 @@ const hasReal = computed(() => {
     (Array.isArray(skills.tools) && skills.tools.length) ||
     (Array.isArray(skills.product) && skills.product.length) ||
     (Array.isArray(skills.soft) && skills.soft.length) ||
-    (Array.isArray(p.awards) && p.awards.length)
+    (Array.isArray(p.awards) && p.awards.length) ||
+    (typeof p.self_evaluation === 'string' && p.self_evaluation.trim())
   )
 })
 
@@ -223,7 +243,8 @@ function mapProfile(p) {
       product: (p.skills && p.skills.product) || [],
       soft: (p.skills && p.skills.soft) || []
     },
-    awards: Array.isArray(p.awards) ? p.awards : []
+    awards: Array.isArray(p.awards) ? p.awards : [],
+    self_evaluation: typeof p.self_evaluation === 'string' ? p.self_evaluation : ''
   }
 }
 
@@ -234,6 +255,17 @@ const previewLabel = computed(() => hasReal.value ? '实时预览 · 仅展示�
 function has(key) {
   return props.completedSections.includes(key)
 }
+
+// 已解锁的正文板块,按用户顺序排列;获奖/自评没有内容时不占位
+const visibleOrder = computed(() => {
+  const unlocked = new Set(props.completedSections.map(s => PREVIEW_TO_KEY[s]).filter(Boolean))
+  return normalizeSectionOrder(props.sectionOrder).filter(key => {
+    if (!unlocked.has(key)) return false
+    if (key === 'awards') return displayResume.value.awards && displayResume.value.awards.length
+    if (key === 'self_evaluation') return !!displayResume.value.self_evaluation
+    return true
+  })
+})
 
 const completedCount = computed(() => props.completedSections.length)
 </script>
@@ -395,6 +427,57 @@ const completedCount = computed(() => props.completedSections.length)
   height: 17px;
   background: var(--gradient-primary);
   border-radius: 2px;
+}
+
+/* ============ 板块排序按钮 ============ */
+.resume-section.reorderable .section-title {
+  display: flex;
+  width: 100%;
+}
+
+.section-tools {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease-out);
+}
+
+.resume-section.reorderable:hover .section-tools,
+.section-tools:focus-within {
+  opacity: 1;
+}
+
+.move-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #F1F5F9;
+  border: 1px solid #E2E8F0;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.18s var(--ease-out);
+}
+
+.move-btn:hover:not(:disabled) {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+}
+
+.move-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ============ 自评 ============ */
+.self-eval {
+  font-size: 13px;
+  color: #334155;
+  line-height: 1.7;
 }
 
 /* ============ 教育 ============ */

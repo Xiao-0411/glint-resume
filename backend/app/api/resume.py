@@ -11,8 +11,9 @@ from app.core.auth_deps import get_current_user
 from app.core.config import settings
 from app.core.input_sanitizer import sanitize_target_job
 from app.models.db_models import User
-from app.models.schemas import GenerateResumeRequest
+from app.models.schemas import GenerateResumeRequest, ResumeLayoutRequest
 from app.services import llm_service
+from app.services import resume_sections as sections
 from app.services.resume_service import generate_resume_from_session
 from app.services.evaluation_service import evaluate_resume
 from app.services.pdf_service import generate_pdf_bytes
@@ -31,12 +32,14 @@ async def generate_resume(
     user_id = current_user.id
     req.target_job = sanitize_target_job(req.target_job)
     try:
-        session_store.get_or_create(req.session_id, req.target_job, user_id)
+        session = session_store.get_or_create(req.session_id, req.target_job, user_id)
     except PermissionError:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="该会话属于其他用户",
         )
+    # 示例简历也沿用用户在对话中调整过的板块顺序
+    section_order = sections.normalize_progress(session.get("progress"))["order"]
 
     def save_result(resume, quality_report, source="chat"):
         resume_id = session_store.save_resume(
@@ -56,7 +59,7 @@ async def generate_resume(
         return resume_id
 
     if not settings.llm_available:
-        resume = mock_resume(req.target_job)
+        resume = {**mock_resume(req.target_job), "section_order": section_order}
         quality_report = mock_quality_report()
         resume_id = save_result(resume, quality_report, source="mock")
         return {
@@ -99,7 +102,7 @@ async def generate_resume(
             "session_id": req.session_id,
             "user_id": user_id,
         })
-        resume = mock_resume(req.target_job)
+        resume = {**mock_resume(req.target_job), "section_order": section_order}
         quality_report = mock_quality_report()
         resume_id = save_result(resume, quality_report, source="mock")
         return {
@@ -139,6 +142,20 @@ def delete_resume(
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="简历不存在")
     return {"ok": True}
+
+
+@router.patch("/resumes/{resume_id}/layout")
+def update_resume_layout(
+    resume_id: int,
+    req: ResumeLayoutRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """调整已生成简历的板块顺序(例如把教育背景挪到末尾),PDF 导出沿用该顺序。"""
+    order = sections.normalize_section_order(req.section_order)
+    updated = session_store.update_resume_layout(resume_id, current_user.id, order)
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="简历不存在")
+    return {"resume": updated, "section_order": order}
 
 
 @router.get("/resume/pdf")

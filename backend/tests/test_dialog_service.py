@@ -2,7 +2,9 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.services import dialog_service, llm_service
+from app.mock import fallback
+from app.services import dialog_service, llm_service, pdf_service
+from app.services import resume_sections as sections
 
 
 def complete_experience():
@@ -23,6 +25,7 @@ def complete_experience():
 class FakeSessionStore:
     def __init__(self, session):
         self.session = session
+        self.session.setdefault("progress", {})
 
     def get_or_create(self, session_id, target_job="", user_id=None):
         return self.session
@@ -33,8 +36,24 @@ class FakeSessionStore:
     def set_stage(self, session_id, stage):
         self.session["stage"] = stage
 
+    def update_extracted(self, session_id, info):
+        self.session.setdefault("extracted", {}).update(info)
+
+    def update_progress(self, session_id, progress):
+        self.session["progress"] = dict(progress)
+
     def get(self, session_id):
         return self.session
+
+
+def make_plan(session, stage, quick=None):
+    return dialog_service.TurnPlan(
+        session=session,
+        stage=stage,
+        system_prompt="system",
+        quick_replies=list(quick or []),
+        progress=sections.normalize_progress(session.get("progress")),
+    )
 
 
 class StageGapTests(unittest.TestCase):
@@ -162,7 +181,7 @@ class StageGapTests(unittest.TestCase):
 
 
 class StageTransitionTests(unittest.IsolatedAsyncioTestCase):
-    def make_session(self, extracted):
+    def make_session(self, extracted, stage="experience_mining", progress=None):
         return {
             "session_id": "test-session",
             "target_job": "产品经理",
@@ -170,20 +189,68 @@ class StageTransitionTests(unittest.IsolatedAsyncioTestCase):
                 "role": "assistant",
                 "content": "以上是这段经历的总结，是否准确？如无误请回复确认。",
             }],
-            "stage": "experience_mining",
+            "stage": stage,
             "extracted": extracted,
+            "progress": progress or {},
         }
 
-    async def prepare(self, session, message):
+    async def prepare(self, session, message, section=None, user_msg_count=3):
         store = FakeSessionStore(session)
         with patch.object(dialog_service, "session_store", store):
-            return await dialog_service.prepare_stage_info(
+            return await dialog_service.plan_turn(
                 "test-session",
                 "产品经理",
                 message,
-                user_msg_count=3,
+                user_msg_count=user_msg_count,
                 user_id="user-1",
+                section=section,
             )
+
+    async def test_first_turn_lists_sections_and_lets_user_choose(self):
+        session = self.make_session({}, stage="basic_info")
+        session["messages"] = []
+
+        plan = await self.prepare(session, "我想做产品经理", user_msg_count=1)
+
+        self.assertEqual(plan.stage, sections.HUB_STAGE)
+        self.assertIsNotNone(plan.canned_reply)
+        for label in ("基本信息", "教育背景", "项目经历", "专业技能", "获奖荣誉", "自我评价"):
+            self.assertIn(label, plan.canned_reply)
+            self.assertIn(label, plan.quick_replies)
+        self.assertNotIn(sections.GENERATE_LABEL, plan.quick_replies)
+        self.assertIn("你想先从哪一块开始", plan.canned_reply)
+
+    async def test_explicit_section_choice_enters_that_section(self):
+        session = self.make_session({}, stage=sections.HUB_STAGE)
+        session["messages"][-1]["content"] = sections.build_overview_reply("产品经理")
+
+        plan = await self.prepare(session, "教育背景", section="education")
+
+        self.assertEqual(plan.stage, "education")
+        self.assertIsNone(plan.canned_reply)
+        self.assertIn("用户刚刚选择了「教育背景」板块", plan.system_prompt)
+        self.assertIn("确认", plan.quick_replies)
+
+    async def test_hub_free_text_is_routed_by_keywords(self):
+        session = self.make_session({}, stage=sections.HUB_STAGE)
+        session["messages"][-1]["content"] = sections.build_overview_reply("产品经理")
+
+        plan = await self.prepare(session, "我是某大学计算机专业本科，2025 年毕业")
+
+        self.assertEqual(plan.stage, "education")
+        self.assertIn("已经提供了一部分信息", plan.system_prompt)
+
+    async def test_hub_question_falls_back_to_llm_hub_hint(self):
+        session = self.make_session({}, stage=sections.HUB_STAGE)
+        session["messages"][-1]["content"] = sections.build_overview_reply("产品经理")
+
+        with patch.object(dialog_service, "_classify_section_llm", AsyncMock(return_value=None)):
+            plan = await self.prepare(session, "STAR-L 是什么意思？")
+
+        self.assertEqual(plan.stage, sections.HUB_STAGE)
+        self.assertIsNone(plan.canned_reply)
+        self.assertIn("剩余板块", plan.system_prompt)
+        self.assertIn("教育背景", plan.quick_replies)
 
     async def test_incomplete_experience_blocks_confirmation(self):
         session = self.make_session({
@@ -195,37 +262,172 @@ class StageTransitionTests(unittest.IsolatedAsyncioTestCase):
             }]
         })
 
-        _, stage, system_prompt, replies = await self.prepare(session, "确认")
+        plan = await self.prepare(session, "确认")
 
-        self.assertEqual(stage, "experience_mining")
-        self.assertIn("系统质量门槛", system_prompt)
-        self.assertIn("结果或成果证据", system_prompt)
-        self.assertIn("我补充具体行动", replies)
+        self.assertEqual(plan.stage, "experience_mining")
+        self.assertIn("系统质量门槛", plan.system_prompt)
+        self.assertIn("结果或成果证据", plan.system_prompt)
+        self.assertIn("我补充具体行动", plan.quick_replies)
 
     async def test_confirmed_experience_asks_for_another(self):
         session = self.make_session({"experiences": [complete_experience()]})
 
-        _, stage, system_prompt, replies = await self.prepare(session, "确认")
+        plan = await self.prepare(session, "确认")
 
-        self.assertEqual(stage, "experience_mining")
-        self.assertIn("当前经历已确认", system_prompt)
-        self.assertIn("没有其他经历了", replies)
+        self.assertEqual(plan.stage, "experience_mining")
+        self.assertIn("当前经历已确认", plan.system_prompt)
+        self.assertIn("没有其他经历了", plan.quick_replies)
 
-    async def test_no_more_experience_advances(self):
+    async def test_no_more_experience_completes_section_and_returns_to_hub(self):
         session = self.make_session({"experiences": [complete_experience()]})
         session["messages"][-1]["content"] = "这段经历已确认。还有其他经历要补充吗？"
 
-        _, stage, system_prompt, _ = await self.prepare(session, "没有其他经历了")
+        plan = await self.prepare(session, "没有其他经历了")
 
-        self.assertEqual(stage, "awards")
-        self.assertIn("现在你必须立刻切换到「获奖」", system_prompt)
+        self.assertEqual(plan.stage, sections.HUB_STAGE)
+        self.assertIn("experience_mining", plan.progress["completed"])
+        self.assertIn("「项目经历」已完成", plan.canned_reply)
+        self.assertIn("还剩下这些板块", plan.canned_reply)
+        self.assertNotIn("项目经历", plan.quick_replies)
+        self.assertIn("基本信息", plan.quick_replies)
+        # 必填的基本信息还没做,不能生成
+        self.assertNotIn(sections.GENERATE_LABEL, plan.quick_replies)
+        self.assertEqual(session["stage"], sections.HUB_STAGE)
+        self.assertEqual(session["progress"]["completed"], ["experience_mining"])
 
-    async def test_force_advance_bypasses_quality_gate(self):
+    async def test_force_advance_without_data_marks_section_skipped(self):
         session = self.make_session({})
 
-        _, stage, _, _ = await self.prepare(session, "下一步")
+        plan = await self.prepare(session, "跳过")
 
-        self.assertEqual(stage, "awards")
+        self.assertEqual(plan.stage, sections.HUB_STAGE)
+        self.assertIn("experience_mining", plan.progress["skipped"])
+        self.assertNotIn("experience_mining", plan.progress["completed"])
+        self.assertIn("已跳过「**项目经历**」", plan.canned_reply)
+
+    async def test_generate_is_offered_once_required_sections_are_done(self):
+        session = self.make_session(
+            {"experiences": [complete_experience()], "fullname": "李同学"},
+            stage="skills",
+            progress={"completed": ["basic_info", "experience_mining"]},
+        )
+        session["messages"][-1]["content"] = "- 技术栈：Python\n以上信息是否准确？如无误请回复“确认”。"
+        session["extracted"]["skills"] = {"technical": ["Python"]}
+
+        plan = await self.prepare(session, "确认")
+
+        self.assertEqual(plan.stage, sections.HUB_STAGE)
+        self.assertIn(sections.GENERATE_LABEL, plan.quick_replies)
+        self.assertIn("必填板块都已完成", plan.canned_reply)
+
+    async def test_generate_request_is_blocked_until_required_sections_done(self):
+        session = self.make_session({}, stage=sections.HUB_STAGE, progress={"completed": ["education"]})
+
+        plan = await self.prepare(session, "生成简历", section="generate")
+
+        self.assertEqual(plan.stage, sections.HUB_STAGE)
+        self.assertIn("生成简历前还需要先完成必填板块", plan.canned_reply)
+        self.assertIn("基本信息", plan.canned_reply)
+        self.assertIn("项目经历", plan.canned_reply)
+
+    async def test_generate_request_moves_to_ready_when_allowed(self):
+        session = self.make_session(
+            {}, stage=sections.HUB_STAGE,
+            progress={"completed": ["basic_info", "experience_mining"]},
+        )
+
+        plan = await self.prepare(session, "生成简历")
+
+        self.assertEqual(plan.stage, sections.READY_STAGE)
+        self.assertEqual(plan.quick_replies, [])
+        self.assertIn("信息收集完成", plan.canned_reply)
+
+    async def test_switch_request_inside_section_changes_section(self):
+        session = self.make_session({}, stage="education")
+        session["messages"][-1]["content"] = "请告诉我你的学校和专业。"
+
+        plan = await self.prepare(session, "先做技能吧")
+
+        self.assertEqual(plan.stage, "skills")
+        self.assertIn("用户刚刚选择了「专业技能」板块", plan.system_prompt)
+
+    async def test_revisiting_completed_section_asks_what_to_change(self):
+        session = self.make_session(
+            {}, stage=sections.HUB_STAGE, progress={"completed": ["education"]},
+        )
+
+        plan = await self.prepare(session, "教育背景", section="education")
+
+        self.assertEqual(plan.stage, "education")
+        self.assertIn("重新选择了已完成的「教育背景」板块", plan.system_prompt)
+
+
+class ResumeSectionsTests(unittest.TestCase):
+    def test_order_normalization_keeps_every_section_once(self):
+        order = sections.normalize_section_order(["skills", "education", "skills", "unknown"])
+
+        self.assertEqual(order[:2], ["skills", "education"])
+        self.assertEqual(sorted(order), sorted(sections.DEFAULT_SECTION_ORDER))
+
+    def test_education_can_be_moved_to_the_end(self):
+        order = sections.normalize_section_order(
+            ["experience_mining", "skills", "awards", "self_evaluation", "education"]
+        )
+
+        self.assertEqual(order[-1], "education")
+
+    def test_hub_reply_after_last_section_offers_generation(self):
+        progress = {"completed": sections.SECTION_KEYS}
+
+        reply = sections.build_hub_reply(progress, just_finished="self_evaluation")
+
+        self.assertIn("所有板块都已完成", reply)
+        self.assertEqual(sections.hub_quick_replies(progress), [sections.GENERATE_LABEL])
+
+    def test_hub_reply_never_looks_like_a_recap(self):
+        reply = sections.build_hub_reply({}, just_finished="education")
+
+        self.assertFalse(any(signal in reply for signal in dialog_service.RECAP_SIGNALS))
+
+    def test_keyword_routing_requires_a_single_winner(self):
+        self.assertEqual(sections.infer_section_from_message("获奖荣誉"), "awards")
+        self.assertEqual(sections.infer_section_from_message("我拿过两次奖学金"), "awards")
+        self.assertIsNone(sections.infer_section_from_message("你好"))
+
+    def test_pdf_body_follows_section_order(self):
+        resume = fallback.mock_resume("产品经理")
+        resume["section_order"] = ["skills", "experience_mining", "awards", "self_evaluation", "education"]
+
+        html = pdf_service.build_resume_html(resume)
+
+        def pos(title):
+            return html.index(f'<div class="section-title">{title}</div>')
+
+        self.assertLess(pos("技能清单"), pos("项目经历"))
+        self.assertLess(pos("项目经历"), pos("教育背景"))
+        self.assertLess(pos("自我评价"), pos("教育背景"))
+
+
+class MockDialogTests(unittest.TestCase):
+    def test_mock_flow_walks_through_section_selection(self):
+        session = {"messages": [], "stage": "basic_info", "progress": {}}
+
+        first = fallback.mock_chat_reply("产品经理", 1, session=session, user_message="我想做产品经理")
+        self.assertEqual(first["stage"], sections.HUB_STAGE)
+        self.assertIn("教育背景", first["quick_replies"])
+
+        session["messages"].append({"role": "assistant", "content": first["reply"]})
+        session["stage"] = first["stage"]
+        picked = fallback.mock_chat_reply(
+            "产品经理", 2, session=session, user_message="教育背景", section="education"
+        )
+        self.assertEqual(picked["stage"], "education")
+
+        session["stage"] = picked["stage"]
+        done = fallback.mock_chat_reply("产品经理", 3, session=session, user_message="本科 2025 届")
+        self.assertEqual(done["stage"], sections.HUB_STAGE)
+        self.assertEqual(done["progress"]["completed"], ["education"])
+        self.assertNotIn("教育背景", done["quick_replies"])
 
 
 class StreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -251,8 +453,8 @@ class StreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(dialog_service, "session_store", store),
             patch.object(
                 dialog_service,
-                "prepare_stage_info",
-                AsyncMock(return_value=(session, "experience_mining", "system", [])),
+                "plan_turn",
+                AsyncMock(return_value=make_plan(session, "experience_mining")),
             ),
             patch.object(dialog_service.llm_service, "chat_stream", interrupted_stream),
             patch.object(
@@ -293,8 +495,8 @@ class StreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(dialog_service, "session_store", store),
             patch.object(
                 dialog_service,
-                "prepare_stage_info",
-                AsyncMock(return_value=(session, "basic_info", "system", [])),
+                "plan_turn",
+                AsyncMock(return_value=make_plan(session, "basic_info")),
             ),
             patch.object(dialog_service.llm_service, "chat_stream", completed_but_cut_off),
             patch.object(
@@ -335,8 +537,8 @@ class StreamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(dialog_service, "session_store", store),
             patch.object(
                 dialog_service,
-                "prepare_stage_info",
-                AsyncMock(return_value=(session, "basic_info", "system", [])),
+                "plan_turn",
+                AsyncMock(return_value=make_plan(session, "basic_info")),
             ),
             patch.object(dialog_service.llm_service, "chat_stream", completed_but_semantically_cut_off),
             patch.object(
@@ -385,8 +587,8 @@ class StructuredChatResponseTests(unittest.IsolatedAsyncioTestCase):
             patch.object(dialog_service, "session_store", store),
             patch.object(
                 dialog_service,
-                "prepare_stage_info",
-                AsyncMock(return_value=(session, "basic_info", "system", ["确认"])),
+                "plan_turn",
+                AsyncMock(return_value=make_plan(session, "basic_info", ["确认"])),
             ),
             patch.object(
                 dialog_service.llm_service,
@@ -413,8 +615,8 @@ class StructuredChatResponseTests(unittest.IsolatedAsyncioTestCase):
             patch.object(dialog_service, "session_store", store),
             patch.object(
                 dialog_service,
-                "prepare_stage_info",
-                AsyncMock(return_value=(session, "basic_info", "system", [])),
+                "plan_turn",
+                AsyncMock(return_value=make_plan(session, "basic_info")),
             ),
             patch.object(dialog_service.llm_service, "chat_complete", complete),
         ):

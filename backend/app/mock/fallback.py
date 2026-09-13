@@ -3,134 +3,141 @@ Mock 兜底数据 —— 完全复刻前端 mock 脚本
 当 USE_MOCK=true 或 LLM_API_KEY 未配置时启用
 确保:即使没有 LLM,demo 也能完整走通
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-# 9 轮对话脚本,与前端 mock 完全对齐
-def build_dialog_script(target_job: str) -> List[Dict]:
-    job = target_job or "产品经理"
-    return [
-        {
-            "reply": (
-                f"你好!欢迎使用识光简历 ✈️\n\n"
-                f"你想做「**{job}**」,这是个很有发展空间的方向。"
-                f"接下来我会像聊天一样,一步步帮你梳理简历内容。\n\n"
-                "**第一步:先认识一下你**\n"
-                "方便告诉我你的**姓名**、**联系方式**(手机或邮箱)和**所在城市**吗?"
-                '一句话简单说就行,比如:"我叫李同学,手机 138xxxx,邮箱 xx@qq.com,在上海"。'
-            ),
-            "stage": "basic_info",
-            "stage_label": "基本信息",
-            "quick_replies": ["李同学,138 0000 0000,上海", "我先不填,直接开始", "只想填邮箱可以吗"]
-        },
-        {
-            "reply": (
-                "好的,记下来啦 ✅\n\n"
-                "**第二步:你的教育背景**\n"
-                "请告诉我你的**学校**、**专业**、**学历**和**预计毕业时间**。"
-                "如果有 GPA、专业排名、关键课程也可以一起说。\n\n"
-                '比如:"我是某 985 大学计算机科学专业本科,2025 年 6 月毕业,GPA 3.7"。'
-            ),
-            "stage": "education",
-            "stage_label": "教育背景",
-            "quick_replies": ["本科 2025 届", "硕士 2025 届", "我还在大二/大三"]
-        },
-        {
-            "reply": (
-                "教育背景已收到 🎓\n\n"
-                "**第三步:挖掘你的经历**\n"
-                "这是简历最关键的部分。**大学期间,哪个课程作业 / 项目 / 实习 / 比赛 / "
-                "社团活动让你印象最深刻?**\n\n"
-                "哪怕只是一次课堂实验、一个小工具、一段志愿服务都可以——"
-                "很多看似平常的经历,经过 STAR-L 重塑后会非常出彩。"
-            ),
-            "stage": "experience_mining",
-            "stage_label": "项目经历",
-            "quick_replies": ["做过一个课程项目", "参加过一场比赛", "有过实习经历", "参加过社团"]
-        },
-        {
-            "reply": (
-                "这段经历很有挖掘价值 ✨\n\n"
-                "我来用 **STAR-L 法则**深入了解一下:\n\n"
-                "• **背景(S)**:这个项目是在什么背景下做的?要解决什么问题?\n"
-                "• **角色(T)**:你**具体负责哪一部分**?团队里你的角色是什么?\n\n"
-                "一句话简单说说就行。"
-            ),
-            "stage": "experience_mining",
-            "stage_label": "项目经历",
-            "quick_replies": ["是课程要求的", "自己感兴趣发起的", "老师指定的课题"]
-        },
-        {
-            "reply": (
-                "思路很清晰!再继续聊聊:\n\n"
-                "• **行动(A)**:你用了**什么工具或方法**?过程中遇到过什么困难,是怎么解决的?\n"
-                "• **成果(R)**:最终的成果是什么?有没有**具体数据**(用户数、效率提升、得分、获奖等)?\n\n"
-                '数据越具体越好——这是简历的"金字招牌"。'
-            ),
-            "stage": "experience_mining",
-            "stage_label": "项目经历",
-            "quick_replies": ["用了 Python/Vue 等技术", "遇到过技术难题", "成果还不错"]
-        },
-        {
-            "reply": (
-                "太棒了!最后一个问题:**做完这个项目,你最大的收获是什么(L)?** "
-                "是技术能力的提升,还是方法论的成长?\n\n"
-                "另外,**你还有其他经历**吗?比如其他课程项目、实习、社团、志愿服务……越多越好。"
-            ),
-            "stage": "experience_mining",
-            "stage_label": "项目经历",
-            "quick_replies": ["还有一段比赛经历", "有一段社团经历", "就这些了"]
-        },
-        {
-            "reply": (
-                "我已经记下你的几段经历了 📒\n\n"
-                "**第四步:你的技能清单**\n"
-                "请告诉我你掌握的**技术栈 / 工具 / 软件 / 语言**,分类列举即可。\n\n"
-                "比如:\n"
-                "• 技术栈:Java、Spring Boot、MySQL、Redis\n"
-                "• 工具:Git、Linux、VSCode\n"
-                "• 软技能:项目管理、跨部门沟通"
-            ),
-            "stage": "skills",
-            "stage_label": "技能",
-            "quick_replies": ["让 AI 根据经历推断", "我有一份技能清单", "不确定怎么填"]
-        },
-        {
-            "reply": (
-                "技能记录完毕 🛠️\n\n"
-                "**第五步:获奖与荣誉(可选)**\n"
-                "你有什么**奖学金、竞赛奖项、证书**之类的吗?"
-                '如果有就简单列举一下,没有的话可以直接说"没有",我们继续下一步。'
-            ),
-            "stage": "awards",
-            "stage_label": "获奖",
-            "quick_replies": ["获得过奖学金", "有比赛获奖", "考过相关证书", "没有获奖经历"]
-        },
-        {
-            "reply": (
-                "好的,所有信息都收集齐了 🎯\n\n"
-                "我对你的整体画像已经有了清晰的了解:\n"
-                "• **基本信息** ✅\n"
-                "• **教育背景** ✅\n"
-                "• **项目/经历**(含 STAR-L 细节)✅\n"
-                "• **技能清单** ✅\n"
-                "• **获奖荣誉** ✅\n\n"
-                "接下来我会用 STAR-L 法则重塑你的经历描述,"
-                "生成一份**专业、量化、可信**的简历,并附上五维质量评估报告。\n\n"
-                "稍等几秒……"
-            ),
-            "stage": "ready_to_generate",
-            "stage_label": "准备生成",
-            "quick_replies": []
-        }
-    ]
+from app.services import resume_sections as sections
+
+# 板块式 demo 对话:每个板块只有一句引导问题,用户任意回复即视为完成该板块。
+MOCK_SECTION_PROMPTS = {
+    "basic_info": {
+        "reply": (
+            "好的,我们先来认识一下你 👋\n\n"
+            "方便告诉我你的**姓名**、**联系方式**(手机或邮箱)和**所在城市**吗?"
+            '一句话简单说就行,比如:"我叫李同学,手机 138xxxx,邮箱 xx@qq.com,在上海"。'
+        ),
+        "quick_replies": ["李同学,138 0000 0000,上海", "我先不填手机,只留邮箱", "跳过"],
+    },
+    "education": {
+        "reply": (
+            "好的,聊聊你的**教育背景** 🎓\n\n"
+            "请告诉我你的**学校**、**专业**、**学历**和**预计毕业时间**。"
+            "如果有 GPA、专业排名、关键课程也可以一起说。\n\n"
+            '比如:"我是某 985 大学计算机科学专业本科,2025 年 6 月毕业,GPA 3.7"。'
+        ),
+        "quick_replies": ["本科 2025 届", "硕士 2025 届", "我还在大二/大三"],
+    },
+    "experience_mining": {
+        "reply": (
+            "这是简历最关键的部分 ✨\n\n"
+            "**大学期间,哪个课程作业 / 项目 / 实习 / 比赛 / 社团活动让你印象最深刻?**\n\n"
+            "哪怕只是一次课堂实验、一个小工具、一段志愿服务都可以——"
+            "很多看似平常的经历,经过 STAR-L 重塑后会非常出彩。"
+        ),
+        "quick_replies": ["做过一个课程项目", "参加过一场比赛", "有过实习经历", "参加过社团"],
+    },
+    "skills": {
+        "reply": (
+            "来整理你的**专业技能** 🛠️\n\n"
+            "请告诉我你掌握的**技术栈 / 工具 / 软件 / 语言**,分类列举即可。\n\n"
+            "比如:\n"
+            "• 技术栈:Java、Spring Boot、MySQL、Redis\n"
+            "• 工具:Git、Linux、VSCode\n"
+            "• 软技能:项目管理、跨部门沟通"
+        ),
+        "quick_replies": ["让 AI 根据经历推断", "我有一份技能清单", "不确定怎么填"],
+    },
+    "awards": {
+        "reply": (
+            "说说你的**获奖与荣誉**(可选)🏅\n\n"
+            "有没有**奖学金、竞赛奖项、证书**之类的?"
+            '如果有就简单列举一下,没有的话可以直接说"没有"。'
+        ),
+        "quick_replies": ["获得过奖学金", "有比赛获奖", "考过相关证书", "没有获奖经历"],
+    },
+    "self_evaluation": {
+        "reply": (
+            "最后是**自我评价**(可选)✍️\n\n"
+            "用一两句话概括你的核心优势或求职期待,也可以告诉我想突出的方向,我来帮你起草。"
+        ),
+        "quick_replies": ["帮我根据经历起草", "我自己说说优势", "跳过这部分"],
+    },
+}
 
 
-def mock_chat_reply(target_job: str, user_msg_count: int) -> Dict:
-    script = build_dialog_script(target_job)
-    idx = min(user_msg_count - 1, len(script) - 1)
-    if idx < 0:
-        idx = 0
-    return script[idx]
+def _mock_payload(stage: str, reply: str, quick_replies: List[str], progress: Dict) -> Dict:
+    labels = {
+        **sections.SECTION_LABELS,
+        sections.HUB_STAGE: "选择板块",
+        sections.READY_STAGE: "准备生成",
+    }
+    return {
+        "reply": reply,
+        "stage": stage,
+        "stage_label": labels.get(stage, ""),
+        "quick_replies": quick_replies,
+        "progress": progress,
+    }
+
+
+def mock_chat_reply(
+    target_job: str,
+    user_msg_count: int,
+    session: Optional[Dict] = None,
+    user_message: str = "",
+    section: Optional[str] = None,
+) -> Dict:
+    """板块式 demo 回复:开场列板块 → 用户选板块 → 任意回复即完成 → 回到板块选择。
+
+    返回值中的 stage / progress 需要由调用方写回 session。"""
+    session = session or {}
+    progress = sections.normalize_progress(session.get("progress"))
+    stage = session.get("stage") or sections.HUB_STAGE
+    has_assistant = any(m.get("role") == "assistant" for m in session.get("messages", []))
+
+    if user_msg_count <= 1 or not has_assistant:
+        return _mock_payload(
+            sections.HUB_STAGE,
+            sections.build_overview_reply(target_job),
+            sections.hub_quick_replies(progress),
+            progress,
+        )
+
+    def hub(**kwargs) -> Dict:
+        return _mock_payload(
+            sections.HUB_STAGE,
+            sections.build_hub_reply(progress, **kwargs),
+            sections.hub_quick_replies(progress),
+            progress,
+        )
+
+    explicit = section if section in sections.SECTION_KEYS or section == sections.GENERATE_ACTION else None
+    if explicit == sections.GENERATE_ACTION or sections.is_generate_request(user_message):
+        if sections.can_generate(progress):
+            return _mock_payload(sections.READY_STAGE, sections.build_ready_reply(), [], progress)
+        return hub(blocked_generate=True)
+
+    at_hub = stage in (sections.HUB_STAGE, sections.READY_STAGE)
+    chosen = explicit
+    if chosen is None:
+        chosen = (
+            sections.infer_section_from_message(user_message)
+            if at_hub else sections.detect_switch_request(user_message)
+        )
+
+    if chosen and (at_hub or chosen != stage):
+        prompt = MOCK_SECTION_PROMPTS[chosen]
+        return _mock_payload(chosen, prompt["reply"], prompt["quick_replies"], progress)
+
+    if at_hub:
+        return hub(unclear=True)
+
+    # 板块内:demo 模式不做真实提取,用户任意回复即视为完成该板块。
+    skipped = "跳过" in (user_message or "")
+    progress = sections.mark_section(progress, stage, skipped=skipped)
+    reply = sections.build_hub_reply(progress, just_finished=stage, skipped=skipped)
+    if not skipped:
+        reply = "记下来啦 ✅(演示模式不会真正提取信息)\n\n" + reply
+    return _mock_payload(sections.HUB_STAGE, reply, sections.hub_quick_replies(progress), progress)
 
 
 def mock_resume(target_job: str = "产品经理") -> Dict:

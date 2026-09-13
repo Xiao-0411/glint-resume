@@ -22,6 +22,8 @@ import {
   resolveAssetUrl,
   attachSession,
   getLatestSession,
+  updateSessionLayout,
+  updateResumeLayout,
   listResumes,
   deleteResume,
   listAdminUsers,
@@ -41,7 +43,7 @@ export const chatApi = {
 
   /**
    * 模拟流式调用（真实后端先返回完整 JSON，再由前端分块播放）
-   * payload: { sessionId, targetJob, userMessage, userMsgCount }
+   * payload: { sessionId, targetJob, userMessage, userMsgCount, section? }
    * handlers: { onDelta(text), onDone(meta), onError(err) }
    *
    * mock 模式下也会"模拟流式":将完整回复按字符切块通过 onDelta 推送
@@ -65,6 +67,7 @@ export const chatApi = {
         stage: resp.stage,
         stageLabel: resp.stageLabel,
         quickReplies: resp.quickReplies || [],
+        progress: resp.progress || null,
         fallback: false
       })
     } catch (e) {
@@ -96,7 +99,12 @@ export const resumeApi = {
 
   deleteHistory: (resumeId) => USE_BACKEND
     ? deleteResume(resumeId)
-    : Promise.resolve({ ok: true })
+    : Promise.resolve({ ok: true }),
+
+  // 已生成简历的板块顺序;mock 模式下只改本地状态
+  updateLayout: (resumeId, sectionOrder) => USE_BACKEND && resumeId
+    ? updateResumeLayout(resumeId, sectionOrder)
+    : Promise.resolve(sectionOrder)
 }
 
 // ============ 账号 ============
@@ -127,7 +135,11 @@ export { resolveAssetUrl }
 
 export const sessionApi = {
   attach: attachSession,
-  latest: getLatestSession
+  latest: getLatestSession,
+  // 对话中调整简历板块顺序;mock 模式下只改本地状态
+  updateLayout: (payload) => USE_BACKEND
+    ? updateSessionLayout(payload)
+    : Promise.resolve(null)
 }
 
 // ============ 权限 / 账号管理 ============

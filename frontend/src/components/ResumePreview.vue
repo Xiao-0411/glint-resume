@@ -51,128 +51,139 @@
         </div>
       </header>
 
-      <!-- 教育背景 -->
-      <section class="resume-section">
-        <h2 class="section-title">
-          <span class="title-bar"></span>
-          <span>教育背景</span>
-        </h2>
-        <div class="edu-list">
-          <div v-for="(edu, i) in resume.education" :key="i" class="edu-item">
-            <div class="edu-row">
-              <span class="edu-school">{{ edu.school }}</span>
-              <span class="edu-period">{{ edu.period }}</span>
-            </div>
-            <div class="edu-row sub">
-              <span>{{ edu.major }} · {{ edu.degree }}</span>
-              <span v-if="edu.gpa">GPA: {{ edu.gpa }}</span>
-            </div>
-            <ul v-if="edu.highlights && edu.highlights.length" class="edu-highlights">
-              <li v-for="(h, j) in edu.highlights" :key="j">{{ h }}</li>
-            </ul>
-          </div>
-        </div>
-      </section>
-
-      <!-- 项目经历 -->
-      <section class="resume-section">
-        <h2 class="section-title">
-          <span class="title-bar"></span>
-          <span>项目经历</span>
-        </h2>
-        <div class="exp-list">
-          <div
-            v-for="(exp, i) in resume.experiences"
-            :key="exp.id || i"
-            :class="['exp-item', { 'exp-highlighted': isExpHighlighted(exp) }]"
-            @click="onExpClick(exp)"
-          >
-            <div class="exp-head">
-              <div class="exp-title-wrap">
-                <span class="exp-title">{{ exp.title }}</span>
-                <span class="exp-role">| {{ exp.role }}</span>
+      <!-- 正文板块：按 resume.section_order 渲染，可编辑时可上移/下移 -->
+      <template v-for="(key, idx) in bodyOrder" :key="key">
+        <!-- 教育背景 -->
+        <section v-if="key === 'education'" class="resume-section" :class="{ reorderable: editable }">
+          <h2 class="section-title">
+            <span class="title-bar"></span>
+            <span>教育背景</span>
+            <SectionMover v-if="editable" :idx="idx" :total="bodyOrder.length" @move="moveSection(key, $event)" />
+          </h2>
+          <div class="edu-list">
+            <div v-for="(edu, i) in resume.education" :key="i" class="edu-item">
+              <div class="edu-row">
+                <span class="edu-school">{{ edu.school }}</span>
+                <span class="edu-period">{{ edu.period }}</span>
               </div>
-              <div class="exp-head-right">
-                <span class="exp-period">{{ exp.period }}</span>
-                <button
-                  v-if="editable"
-                  class="exp-edit-icon no-print"
-                  title="编辑这段经历"
-                  @click.stop="$emit('edit-experience', exp)"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12 20h9"/>
-                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/>
-                  </svg>
-                  <span>编辑</span>
-                </button>
+              <div class="edu-row sub">
+                <span>{{ edu.major }} · {{ edu.degree }}</span>
+                <span v-if="edu.gpa">GPA: {{ edu.gpa }}</span>
+              </div>
+              <ul v-if="edu.highlights && edu.highlights.length" class="edu-highlights">
+                <li v-for="(h, j) in edu.highlights" :key="j">{{ h }}</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- 项目经历 -->
+        <section v-else-if="key === 'experience_mining'" class="resume-section" :class="{ reorderable: editable }">
+          <h2 class="section-title">
+            <span class="title-bar"></span>
+            <span>项目经历</span>
+            <SectionMover v-if="editable" :idx="idx" :total="bodyOrder.length" @move="moveSection(key, $event)" />
+          </h2>
+          <div class="exp-list">
+            <div
+              v-for="(exp, i) in resume.experiences"
+              :key="exp.id || i"
+              :class="['exp-item', { 'exp-highlighted': isExpHighlighted(exp) }]"
+              @click="onExpClick(exp)"
+            >
+              <div class="exp-head">
+                <div class="exp-title-wrap">
+                  <span class="exp-title">{{ exp.title }}</span>
+                  <span class="exp-role">| {{ exp.role }}</span>
+                </div>
+                <div class="exp-head-right">
+                  <span class="exp-period">{{ exp.period }}</span>
+                  <button
+                    v-if="editable"
+                    class="exp-edit-icon no-print"
+                    title="编辑这段经历"
+                    @click.stop="$emit('edit-experience', exp)"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 20h9"/>
+                      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/>
+                    </svg>
+                    <span>编辑</span>
+                  </button>
+                </div>
+              </div>
+              <ul class="exp-bullets">
+                <li v-for="(b, j) in exp.bullets" :key="j">{{ b }}</li>
+              </ul>
+              <span v-if="exp.tag" class="exp-tag" :class="`tag-${exp.tag.color}`">
+                <span class="tag-dot"></span>
+                {{ tagIcon(exp.tag.color) }} {{ exp.tag.label }}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 技能 -->
+        <section v-else-if="key === 'skills'" class="resume-section" :class="{ reorderable: editable }">
+          <h2 class="section-title">
+            <span class="title-bar"></span>
+            <span>专业技能</span>
+            <SectionMover v-if="editable" :idx="idx" :total="bodyOrder.length" @move="moveSection(key, $event)" />
+          </h2>
+          <div class="skill-grid">
+            <div class="skill-row">
+              <span class="skill-label">技术栈</span>
+              <div class="skill-chips">
+                <span v-for="s in resume.skills.technical" :key="s" class="chip">{{ s }}</span>
               </div>
             </div>
-            <ul class="exp-bullets">
-              <li v-for="(b, j) in exp.bullets" :key="j">{{ b }}</li>
-            </ul>
-            <span v-if="exp.tag" class="exp-tag" :class="`tag-${exp.tag.color}`">
-              <span class="tag-dot"></span>
-              {{ tagIcon(exp.tag.color) }} {{ exp.tag.label }}
-            </span>
-          </div>
-        </div>
-      </section>
-
-      <!-- 技能 -->
-      <section class="resume-section">
-        <h2 class="section-title">
-          <span class="title-bar"></span>
-          <span>专业技能</span>
-        </h2>
-        <div class="skill-grid">
-          <div class="skill-row">
-            <span class="skill-label">技术栈</span>
-            <div class="skill-chips">
-              <span v-for="s in resume.skills.technical" :key="s" class="chip">{{ s }}</span>
+            <div class="skill-row">
+              <span class="skill-label">产品能力</span>
+              <div class="skill-chips">
+                <span v-for="s in resume.skills.product" :key="s" class="chip">{{ s }}</span>
+              </div>
+            </div>
+            <div class="skill-row">
+              <span class="skill-label">软技能</span>
+              <div class="skill-chips">
+                <span v-for="s in resume.skills.soft" :key="s" class="chip">{{ s }}</span>
+              </div>
             </div>
           </div>
-          <div class="skill-row">
-            <span class="skill-label">产品能力</span>
-            <div class="skill-chips">
-              <span v-for="s in resume.skills.product" :key="s" class="chip">{{ s }}</span>
-            </div>
-          </div>
-          <div class="skill-row">
-            <span class="skill-label">软技能</span>
-            <div class="skill-chips">
-              <span v-for="s in resume.skills.soft" :key="s" class="chip">{{ s }}</span>
-            </div>
-          </div>
-        </div>
-      </section>
+        </section>
 
-      <!-- 获奖 -->
-      <section class="resume-section" v-if="resume.awards && resume.awards.length">
-        <h2 class="section-title">
-          <span class="title-bar"></span>
-          <span>获奖荣誉</span>
-        </h2>
-        <ul class="award-list">
-          <li v-for="(a, i) in resume.awards" :key="i">{{ a }}</li>
-        </ul>
-      </section>
+        <!-- 获奖 -->
+        <section v-else-if="key === 'awards' && resume.awards && resume.awards.length" class="resume-section" :class="{ reorderable: editable }">
+          <h2 class="section-title">
+            <span class="title-bar"></span>
+            <span>获奖荣誉</span>
+            <SectionMover v-if="editable" :idx="idx" :total="bodyOrder.length" @move="moveSection(key, $event)" />
+          </h2>
+          <ul class="award-list">
+            <li v-for="(a, i) in resume.awards" :key="i">{{ a }}</li>
+          </ul>
+        </section>
 
-      <!-- 自我评价 -->
-      <section class="resume-section" v-if="resume.self_evaluation">
-        <h2 class="section-title">
-          <span class="title-bar"></span>
-          <span>自我评价</span>
-        </h2>
-        <p class="self-eval">{{ resume.self_evaluation }}</p>
-      </section>
+        <!-- 自我评价 -->
+        <section v-else-if="key === 'self_evaluation' && resume.self_evaluation" class="resume-section" :class="{ reorderable: editable }">
+          <h2 class="section-title">
+            <span class="title-bar"></span>
+            <span>自我评价</span>
+            <SectionMover v-if="editable" :idx="idx" :total="bodyOrder.length" @move="moveSection(key, $event)" />
+          </h2>
+          <p class="self-eval">{{ resume.self_evaluation }}</p>
+        </section>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup>
+import { computed, defineComponent, h } from 'vue'
 import { downloadResumePdf } from '@/api/backend'
+import { resumeApi } from '@/api'
 import { useChatStore } from '@/stores/chat'
+import { normalizeSectionOrder, moveSectionInOrder } from '@/content/resumeSections'
 
 const store = useChatStore()
 
@@ -184,6 +195,42 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['highlight-click', 'edit-experience'])
+
+// 正文板块顺序：简历自带 section_order，没有则默认顺序
+const bodyOrder = computed(() => normalizeSectionOrder(props.resume?.section_order))
+
+// 上移/下移一组按钮（打印时隐藏）
+const SectionMover = defineComponent({
+  props: { idx: Number, total: Number },
+  emits: ['move'],
+  setup(p, { emit: e }) {
+    const arrow = (points) => h('svg', {
+      width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+      'stroke-width': 2.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+    }, [h('polyline', { points })])
+    return () => h('span', { class: 'section-tools no-print' }, [
+      h('button', {
+        type: 'button', class: 'move-btn', title: '上移这个板块',
+        disabled: p.idx === 0, onClick: () => e('move', 'up')
+      }, [arrow('18 15 12 9 6 15')]),
+      h('button', {
+        type: 'button', class: 'move-btn', title: '下移这个板块',
+        disabled: p.idx === p.total - 1, onClick: () => e('move', 'down')
+      }, [arrow('6 9 12 15 18 9')])
+    ])
+  }
+})
+
+async function moveSection(key, direction) {
+  const next = moveSectionInOrder(bodyOrder.value, key, direction)
+  // 只改排版，不改内容，不需要重新评分
+  store.setResumeSectionOrder(next)
+  try {
+    await resumeApi.updateLayout(store.currentResumeId, next)
+  } catch {
+    // 远端保存失败不影响本地展示
+  }
+}
 
 function onPrint() {
   if (store.currentResumeId) {
@@ -389,6 +436,50 @@ function onExpClick(exp) {
   height: 20px;
   background: var(--gradient-primary);
   border-radius: 2px;
+}
+
+/* ============ 板块排序按钮（SectionMover 用渲染函数生成，需 :deep） ============ */
+.resume-section.reorderable .section-title {
+  display: flex;
+  width: 100%;
+}
+
+.resume-section :deep(.section-tools) {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease-out);
+}
+
+.resume-section.reorderable:hover :deep(.section-tools),
+.resume-section :deep(.section-tools:focus-within) {
+  opacity: 1;
+}
+
+.resume-section :deep(.move-btn) {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #F1F5F9;
+  border: 1px solid #E2E8F0;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.18s var(--ease-out);
+}
+
+.resume-section :deep(.move-btn:hover:not(:disabled)) {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+}
+
+.resume-section :deep(.move-btn:disabled) {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 /* ============ 教育 ============ */

@@ -52,18 +52,23 @@ async def chat(
     # Complete the ownership check before opening the SSE response. Raising from
     # inside the generator would otherwise turn a 403 into a broken 200 stream.
     try:
-        session_store.get_or_create(req.session_id, req.target_job, user_id)
+        session = session_store.get_or_create(req.session_id, req.target_job, user_id)
     except PermissionError:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="该会话属于其他用户",
         )
 
-    # ==== 无 LLM 或 LLM 格式/网络失败时，统一返回完整 mock ====
-    if not settings.llm_available:
-        mock = mock_chat_reply(req.target_job, req.user_msg_count)
-        session_store.append_message(req.session_id, "user", req.user_message, user_id)
+    def mock_fallback(reason: str, *, record_user_message: bool) -> dict:
+        """板块式 demo 回复,基于本轮开始前的会话快照计算,并把 stage / progress 写回会话。"""
+        mock = mock_chat_reply(
+            req.target_job, req.user_msg_count,
+            session=session, user_message=req.user_message, section=req.section,
+        )
+        if record_user_message:
+            session_store.append_message(req.session_id, "user", req.user_message, user_id)
         session_store.set_stage(req.session_id, mock["stage"], user_id)
+        session_store.update_progress(req.session_id, mock["progress"], user_id)
         session_store.append_message(req.session_id, "assistant", mock["reply"], user_id)
         return {
             "reply": mock["reply"],
@@ -71,10 +76,15 @@ async def chat(
             "stage": mock["stage"],
             "stage_label": mock["stage_label"],
             "quick_replies": mock["quick_replies"],
-            "extracted": {},
+            "extracted": session.get("extracted", {}) if session else {},
+            "progress": mock["progress"],
             "fallback": True,
-            "fallback_reason": "LLM 服务未配置，当前展示的是示例内容",
+            "fallback_reason": reason,
         }
+
+    # ==== 无 LLM 或 LLM 格式/网络失败时，统一返回完整 mock ====
+    if not settings.llm_available:
+        return mock_fallback("LLM 服务未配置，当前展示的是示例内容", record_user_message=True)
 
     with llm_service.usage_context(
         user_id=user_id,
@@ -84,7 +94,8 @@ async def chat(
     ):
         try:
             return await dialog_service.chat_response(
-                req.session_id, req.target_job, req.user_message, req.user_msg_count, user_id
+                req.session_id, req.target_job, req.user_message, req.user_msg_count, user_id,
+                section=req.section,
             )
         except llm_service.LLMError as exc:
             logger.warning("chat_llm_fallback", extra={
@@ -92,16 +103,5 @@ async def chat(
                 "user_id": user_id,
                 "error": str(exc),
             })
-            mock = mock_chat_reply(req.target_job, req.user_msg_count)
-            session_store.set_stage(req.session_id, mock["stage"], user_id)
-            session_store.append_message(req.session_id, "assistant", mock["reply"], user_id)
-            return {
-                "reply": mock["reply"],
-                "complete": True,
-                "stage": mock["stage"],
-                "stage_label": mock["stage_label"],
-                "quick_replies": mock["quick_replies"],
-                "extracted": {},
-                "fallback": True,
-                "fallback_reason": "当前 AI 服务繁忙，展示的是示例内容",
-            }
+            # plan_turn 已经记录了本轮用户消息,这里只补一条示例回复。
+            return mock_fallback("当前 AI 服务繁忙，展示的是示例内容", record_user_message=False)

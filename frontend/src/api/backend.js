@@ -127,8 +127,33 @@ export async function getLatestSession() {
 }
 
 /**
+ * 对话中调整简历正文板块顺序(生成简历时沿用)
+ * @param {Object} payload - { sessionId, sectionOrder }
+ */
+export async function updateSessionLayout(payload) {
+  const { data } = await http.post('/api/sessions/layout', {
+    session_id: payload.sessionId,
+    section_order: payload.sectionOrder || []
+  })
+  return data.progress || null
+}
+
+/**
+ * 调整已生成简历的板块顺序(不触发重评,PDF 导出沿用)
+ * @param {number|string} resumeId
+ * @param {string[]} sectionOrder
+ */
+export async function updateResumeLayout(resumeId, sectionOrder) {
+  const { data } = await http.patch(`/api/resumes/${resumeId}/layout`, {
+    section_order: sectionOrder || []
+  })
+  return data.section_order || []
+}
+
+/**
  * 对话请求：后端返回完整 JSON，前端在此函数中模拟流式播放
- * @param {Object} payload - { sessionId, targetJob, userMessage, userMsgCount }
+ * @param {Object} payload - { sessionId, targetJob, userMessage, userMsgCount, section? }
+ *   section: 用户在板块面板/快捷选项中显式选择的板块 key,或 'generate'
  * @param {Object} handlers - { onDelta(text), onDone(meta), onError(err) }
  */
 export async function sendChatStream(payload, handlers = {}) {
@@ -143,7 +168,8 @@ export async function sendChatStream(payload, handlers = {}) {
         session_id: payload.sessionId,
         target_job: payload.targetJob || '',
         user_message: payload.userMessage,
-        user_msg_count: payload.userMsgCount
+        user_msg_count: payload.userMsgCount,
+        section: payload.section || null
       })
     })
   } catch (e) {
@@ -206,7 +232,8 @@ export async function sendChatStream(payload, handlers = {}) {
       quickReplies: data.quick_replies || [],
       fallback: !!data.fallback,
       fallbackReason: data.fallback_reason || '',
-      extracted: data.extracted || null
+      extracted: data.extracted || null,
+      progress: data.progress || null
     })
   } catch (e) {
     if (e?.name === 'AbortError') throw e

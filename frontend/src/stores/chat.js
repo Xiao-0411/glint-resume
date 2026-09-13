@@ -1,5 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import {
+  HUB_STAGE,
+  normalizeProgress,
+  normalizeSectionOrder,
+  moveSectionInOrder
+} from '@/content/resumeSections'
 
 /**
  * 对话与简历数据全局状态
@@ -11,8 +17,12 @@ export const useChatStore = defineStore('chat', () => {
 
   // ---- 对话状态 ----
   const messages = ref([])    // { role: 'user' | 'ai', text, ts, typing?: boolean }
-  const currentStage = ref('basic_info')
-  //   basic_info → education → experience_mining → awards → skills → ready_to_generate
+  const currentStage = ref(HUB_STAGE)
+  //   section_select(选择板块) ⇄ basic_info / education / experience_mining /
+  //   skills / awards / self_evaluation → ready_to_generate
+  //   板块之间没有固定顺序,由用户自己选择;进度记录在 progress 里。
+  const progress = ref(normalizeProgress({}))
+  //   { completed: [...], skipped: [...], order: [...正文板块顺序] }
 
   // ---- 用户 profile（增量提取） ----
   const userProfile = ref({
@@ -80,6 +90,32 @@ export const useChatStore = defineStore('chat', () => {
     currentStage.value = stage
   }
 
+  function setProgress(data) {
+    // 后端每轮下发的是完整进度快照,直接整体替换
+    if (data && typeof data === 'object') {
+      progress.value = normalizeProgress(data)
+    }
+  }
+
+  /** 简历正文板块顺序(对话中调整,生成简历时沿用) */
+  const sectionOrder = computed(() => progress.value.order)
+
+  function setSectionOrder(order) {
+    progress.value = { ...progress.value, order: normalizeSectionOrder(order) }
+  }
+
+  function moveSection(key, direction) {
+    const next = moveSectionInOrder(progress.value.order, key, direction)
+    setSectionOrder(next)
+    return next
+  }
+
+  /** 已生成简历的板块顺序(结果页调整;不改内容,不需要重评) */
+  function setResumeSectionOrder(order) {
+    if (!resumeData.value) return
+    resumeData.value = { ...resumeData.value, section_order: normalizeSectionOrder(order) }
+  }
+
   function setExtracted(data) {
     // 后端每轮下发的是累积快照,直接整体替换即可（mock 模式不会调用,保持为空 → 预览回落到样例）
     if (data && typeof data === 'object') {
@@ -129,7 +165,8 @@ export const useChatStore = defineStore('chat', () => {
     sessionId.value = generateSessionId()
     targetJob.value = ''
     messages.value = []
-    currentStage.value = 'basic_info'
+    currentStage.value = HUB_STAGE
+    progress.value = normalizeProgress({})
     userProfile.value = {
       fullname: '',
       target_job: '',
@@ -149,13 +186,14 @@ export const useChatStore = defineStore('chat', () => {
 
   /**
    * 从本地快照恢复"当前进度"（登录后自动调用）
-   * snap: { targetJob, currentStage, messages, resumeData, qualityReport }
+   * snap: { targetJob, currentStage, progress, messages, resumeData, qualityReport }
    */
   function hydrate(snap) {
     if (!snap || typeof snap !== 'object') return
     setSessionId(snap.sessionId || snap.session_id || '')
     if (typeof snap.targetJob === 'string') setTargetJob(snap.targetJob)
     if (snap.currentStage) currentStage.value = snap.currentStage
+    progress.value = normalizeProgress(snap.progress)
     if (Array.isArray(snap.messages)) {
       // 去掉残留的流式标记，避免恢复出"正在输入"的气泡
       messages.value = snap.messages.map(m => ({ ...m, streaming: false }))
@@ -177,6 +215,7 @@ export const useChatStore = defineStore('chat', () => {
     targetJob,
     messages,
     currentStage,
+    progress,
     userProfile,
     extractedProfile,
     resumeData,
@@ -187,6 +226,7 @@ export const useChatStore = defineStore('chat', () => {
     // getters
     messageCount,
     userMessageCount,
+    sectionOrder,
     // actions
     setTargetJob,
     setSessionId,
@@ -194,6 +234,10 @@ export const useChatStore = defineStore('chat', () => {
     appendToMessage,
     finishStreamingMessage,
     setStage,
+    setProgress,
+    setSectionOrder,
+    moveSection,
+    setResumeSectionOrder,
     setExtracted,
     setResume,
     updateExperience,

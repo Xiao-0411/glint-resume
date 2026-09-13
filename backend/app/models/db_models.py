@@ -59,6 +59,8 @@ class Session(Base):
     target_job = Column(String(128), default="")
     stage = Column(String(32), default="basic_info")
     extracted = Column(JSON, default=dict)
+    # 板块进度:{"completed": [...], "skipped": [...], "order": [...]}
+    progress = Column(JSON, default=dict)
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 

@@ -1,25 +1,33 @@
 """
-对话服务 —— 状态机推进 + LLM 挖掘式回复
+对话服务 —— 板块状态机 + LLM 挖掘式回复
 
-阶段推进策略:
-- 不按消息轮数推进,只接受明确确认或用户主动跳过。
+板块推进策略:
+- 简历被拆成若干独立板块(见 resume_sections.SECTIONS),没有固定顺序。
+- 开场先列出简历可以包含的板块,由用户自己选择先做哪一块;
+  每完成(或跳过)一块就回到"板块选择"状态,提示还剩下哪些板块。
+- 板块内部不按消息轮数推进,只接受明确确认或用户主动跳过。
 - 确认后仍要通过结构化信息完整度门槛,缺关键证据则继续追问。
-- 项目经历支持多段循环:确认一段后先询问下一段,明确没有更多经历才推进。
+- 项目经历支持多段循环:确认一段后先询问下一段,明确没有更多经历才算完成。
 """
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 from app.core.prompts import (
     DIALOG_SYSTEM_PROMPT, STAGE_HINTS, EXTRACT_PROFILE_PROMPT,
-    ADVANCE_JUDGE_PROMPT
+    ADVANCE_JUDGE_PROMPT, SECTION_CLASSIFY_PROMPT
 )
 from app.services import llm_service
+from app.services import resume_sections as sections
 from app.store.db_store import session_store
 
 logger = logging.getLogger("glint.dialog")
+
+HUB_STAGE = sections.HUB_STAGE
+READY_STAGE = sections.READY_STAGE
 
 
 def _store_get(session_id: str, user_id: Optional[str] = None):
@@ -58,34 +66,30 @@ def _store_extracted(session_id: str, info: Dict, user_id: Optional[str] = None)
         return session_store.update_extracted(session_id, info)
 
 
-STAGE_ORDER = [
-    "basic_info", "education",
-    "experience_mining",
-    "awards", "skills", "ready_to_generate"
-]
+def _store_progress(session_id: str, progress: Dict, user_id: Optional[str] = None):
+    if user_id is None:
+        return session_store.update_progress(session_id, progress)
+    try:
+        return session_store.update_progress(session_id, progress, user_id)
+    except TypeError:
+        return session_store.update_progress(session_id, progress)
+
 
 STAGE_LABELS = {
-    "basic_info": "基本信息",
-    "education": "教育背景",
-    "experience_mining": "项目经历",
-    "skills": "技能",
-    "awards": "获奖",
-    "ready_to_generate": "准备生成"
+    **sections.SECTION_LABELS,
+    HUB_STAGE: "选择板块",
+    READY_STAGE: "准备生成",
 }
-
-def _next_stage(current: str) -> str:
-    try:
-        idx = STAGE_ORDER.index(current)
-    except ValueError:
-        return STAGE_ORDER[0]
-    return STAGE_ORDER[min(idx + 1, len(STAGE_ORDER) - 1)]
 
 
 def _decide_quick_replies(
     stage: str,
     gaps: Optional[List[str]] = None,
     experience_confirmed: bool = False,
+    progress: Optional[Dict] = None,
 ) -> List[str]:
+    if stage == HUB_STAGE:
+        return sections.hub_quick_replies(progress or {})
     if experience_confirmed:
         return ["还有一段课程/个人项目", "还有实习或社团经历", "没有其他经历了"]
     if gaps:
@@ -99,14 +103,15 @@ def _decide_quick_replies(
         "experience_mining": ["做过一个课程项目", "有过实习/兼职", "参加过比赛或社团"],
         "awards": ["没有获奖经历", "获得过奖学金", "确认"],
         "skills": ["根据经历帮我梳理", "我补充使用场景", "确认"],
-        "ready_to_generate": []
+        "self_evaluation": ["帮我根据经历起草", "我自己说说优势", "跳过这部分"],
+        READY_STAGE: []
     }
     return presets.get(stage, [])
 
 
 def _build_messages_for_llm(session: Dict) -> List[Dict]:
     """从 session 历史构造 LLM 输入 messages 列表。
-    用户消息已在 prepare_stage_info 中追加进 session,此处不再重复添加,
+    用户消息已在 plan_turn 中追加进 session,此处不再重复添加,
     否则会向 LLM 连续发送两条完全相同的 user 消息。"""
     return list(session.get("messages", []))
 
@@ -146,6 +151,7 @@ RECAP_STAGE_SIGNALS = {
     ],
     "awards": ["获奖", "奖项", "荣誉", "奖学金", "证书"],
     "skills": ["技能清单", "专业技能", "技术栈", "工具", "软技能"],
+    "self_evaluation": ["自我评价", "核心优势", "个人优势", "求职期待"],
 }
 
 # These function words are strong evidence that a response stopped mid-sentence
@@ -439,6 +445,9 @@ def _stage_gaps(stage: str, extracted: Optional[Dict]) -> List[str]:
             skill_values.extend(skills.get(key) or [])
         return [] if skill_values else ["至少一项有实际使用证据的技能"]
 
+    if stage == "self_evaluation":
+        return [] if "self_evaluation" in data else ["自我评价文案（可以明确说跳过）"]
+
     return []
 
 
@@ -494,17 +503,91 @@ async def _judge_should_advance(
         return False
 
 
-async def prepare_stage_info(
+async def _classify_section_llm(user_message: str) -> Optional[str]:
+    """LLM fallback for free text typed at the hub that keywords cannot route."""
+    try:
+        raw = await llm_service.chat_complete(
+            messages=[{
+                "role": "user",
+                "content": SECTION_CLASSIFY_PROMPT.format(user_message=user_message[:400]),
+            }],
+            temperature=0.0,
+            max_tokens=12,
+            model=settings.LLM_MODEL_FAST,
+            timeout=settings.LLM_TIMEOUT_FAST_SECONDS,
+        )
+    except llm_service.LLMError:
+        return None
+    verdict = (raw or "").strip().lower().strip("`'\"。.")
+    if verdict in sections.SECTION_KEYS or verdict == sections.GENERATE_ACTION:
+        return verdict
+    return None
+
+
+def _section_entry_hint(key: str, progress: Dict, *, from_free_text: bool) -> str:
+    """Stage hint for the turn right after the user picks a section."""
+    label = sections.section_label(key)
+    hint = STAGE_HINTS.get(key, "")
+    if key in progress.get("completed", []):
+        hint += (
+            f"\n\n⚠️ 用户刚刚重新选择了已完成的「{label}」板块,想补充或修改内容。"
+            "先用一句话回顾该板块已确认的内容(从对话历史中提取),再问用户想补充或修改什么;"
+            "修改后重新 recap 并请用户确认。"
+        )
+    elif from_free_text:
+        hint += (
+            f"\n\n⚠️ 用户刚刚选择了「{label}」板块,并且这条消息里已经提供了一部分信息。"
+            "先承接这些信息,再只追问该板块最重要的缺口;不要重复索要已给出的内容,不要讨论其他板块。"
+        )
+    else:
+        hint += (
+            f"\n\n⚠️ 用户刚刚选择了「{label}」板块。以一句简短过渡开头"
+            f"(例如\"好的,我们先来聊聊{label}\"),然后开始该板块的引导提问;不要讨论其他板块。"
+        )
+    return hint
+
+
+def _hub_hint(progress: Dict) -> str:
+    remaining = sections.remaining_sections(progress)
+    hint = STAGE_HINTS.get(HUB_STAGE, "") + "\n\n# 系统说明\n"
+    if remaining:
+        names = "、".join(
+            f"{s['label']}{'(必填)' if s['required'] else ''}" for s in remaining
+        )
+        hint += f"剩余板块:{names}。"
+        if sections.can_generate(progress):
+            hint += "必填板块已完成,也可以提示用户随时点击「生成简历」。"
+    else:
+        hint += "所有板块都已完成,可以提示用户点击「生成简历」,或选择任意板块继续补充。"
+    return hint
+
+
+@dataclass
+class TurnPlan:
+    """Everything the reply generators need for one conversational turn."""
+    session: Dict
+    stage: str
+    system_prompt: str
+    quick_replies: List[str] = field(default_factory=list)
+    progress: Dict = field(default_factory=dict)
+    # Deterministic reply (overview / hub / ready) that replaces the LLM call.
+    canned_reply: Optional[str] = None
+
+
+async def plan_turn(
     session_id: str,
     target_job: str,
     user_message: str,
     user_msg_count: int,
     user_id: Optional[str] = None,
     commit_recap: bool = False,
-) -> Tuple[Dict, str, str, List[str]]:
+    section: Optional[str] = None,
+) -> TurnPlan:
     """
-    在 LLM 主回复前,先确定下一阶段,组装 system prompt
-    返回: (session, next_stage, system_prompt, quick_replies)
+    在 LLM 主回复前,先确定本轮所处板块、组装 system prompt 与快捷回复。
+
+    section: 前端板块面板/快捷选项显式选择的板块 key(或 "generate"),
+             优先级高于对用户文本的关键词/LLM 推断。
     """
     session = session_store.get_or_create(session_id, target_job, user_id)
 
@@ -514,11 +597,96 @@ async def prepare_stage_info(
     # 记录用户消息
     _store_append(session_id, "user", user_message, user_id)
 
-    current_stage = session.get("stage", "basic_info")
+    current_stage = session.get("stage") or HUB_STAGE
+    progress = sections.normalize_progress(session.get("progress"))
+    resolved_job = target_job or session.get("target_job") or "未指定岗位"
 
-    # AI 的 recap 是待确认草稿，不能在生成 recap 的同一轮写入右侧简历。
-    # 只有下一轮用户明确确认时，才把上一条 recap 提取为结构化数据。
-    # commit_recap 默认关闭，保留给只做阶段判断的调用方和单元测试。
+    def finish(
+        stage: str,
+        *,
+        hint: str = "",
+        quick: Optional[List[str]] = None,
+        canned: Optional[str] = None,
+    ) -> TurnPlan:
+        _store_stage(session_id, stage, user_id)
+        _store_progress(session_id, progress, user_id)
+        system_prompt = DIALOG_SYSTEM_PROMPT.format(
+            target_job=resolved_job,
+            stage_hint=hint,
+        )
+        # 重新读取:session 是 append_message 之前的快照,不含本轮用户消息。
+        # 直接用旧快照会导致首轮 messages 为空,LLM 请求被网关拒绝。
+        fresh = _store_get(session_id, user_id) or session
+        return TurnPlan(
+            session=fresh,
+            stage=stage,
+            system_prompt=system_prompt,
+            quick_replies=list(quick or []),
+            progress=progress,
+            canned_reply=canned,
+        )
+
+    def hub(**kwargs) -> TurnPlan:
+        return finish(
+            HUB_STAGE,
+            canned=sections.build_hub_reply(progress, **kwargs),
+            quick=sections.hub_quick_replies(progress),
+        )
+
+    def ready_or_blocked() -> TurnPlan:
+        if sections.can_generate(progress):
+            return finish(READY_STAGE, canned=sections.build_ready_reply(), quick=[])
+        return hub(blocked_generate=True)
+
+    # 1. 首轮(用户首次说"我想做X"):列出简历板块,让用户自己选择先做哪一块。
+    if user_msg_count <= 1 or not last_assistant:
+        return finish(
+            HUB_STAGE,
+            canned=sections.build_overview_reply(resolved_job),
+            quick=sections.hub_quick_replies(progress),
+        )
+
+    # 2. 显式选择(板块面板 / 快捷选项)或"生成简历"。
+    explicit = section if section in sections.SECTION_KEYS or section == sections.GENERATE_ACTION else None
+    if explicit == sections.GENERATE_ACTION or sections.is_generate_request(user_message):
+        return ready_or_blocked()
+
+    at_hub = current_stage in (HUB_STAGE, READY_STAGE)
+    chosen = explicit
+    if chosen is None:
+        if at_hub:
+            chosen = sections.infer_section_from_message(user_message)
+            if chosen is None:
+                chosen = await _classify_section_llm(user_message)
+                if chosen == sections.GENERATE_ACTION:
+                    return ready_or_blocked()
+        else:
+            # 板块内部的"先做技能吧"表示切换板块,而不是回答当前问题。
+            chosen = sections.detect_switch_request(user_message)
+
+    if chosen and (at_hub or chosen != current_stage):
+        from_free_text = (
+            explicit is None
+            and _clean_user_message(user_message).lower() != sections.section_label(chosen).lower()
+        )
+        return finish(
+            chosen,
+            hint=_section_entry_hint(chosen, progress, from_free_text=from_free_text),
+            quick=_decide_quick_replies(chosen),
+        )
+
+    if at_hub:
+        # 无法判断板块的提问/闲聊:让 LLM 简短回应并邀请用户选择板块。
+        return finish(
+            HUB_STAGE,
+            hint=_hub_hint(progress),
+            quick=sections.hub_quick_replies(progress),
+        )
+
+    # 3. 板块内部:采集 → 确认 → 完成板块。
+    # AI 的 recap 是待确认草稿,不能在生成 recap 的同一轮写入右侧简历。
+    # 只有下一轮用户明确确认时,才把上一条 recap 提取为结构化数据。
+    # commit_recap 默认关闭,保留给只做阶段判断的调用方和单元测试。
     recap_committed = False
     if (
         commit_recap
@@ -532,57 +700,48 @@ async def prepare_stage_info(
     blocked_gaps: List[str] = []
     experience_confirmed = False
 
-    # 首轮(用户首次说"我想做X"):一定停留在 basic_info,让 AI 询问
-    if user_msg_count <= 1 or not last_assistant:
-        next_stage = "basic_info"
-        advanced = False
-    else:
-        advance = await _judge_should_advance(current_stage, last_assistant, user_message)
-        force_advance = _is_force_advance(user_message)
+    advance = await _judge_should_advance(current_stage, last_assistant, user_message)
+    force_advance = _is_force_advance(user_message)
 
-        # The lightweight judge also accepts natural confirmations such as
-        # "好的，以上都没问题". Commit the recap after that verdict, before
-        # applying the quality gate, so those confirmations behave like the
-        # one-word quick reply without ever committing unconfirmed content.
-        if (
-            advance
-            and commit_recap
-            and not recap_committed
-            and not force_advance
-            and last_assistant
-            and any(signal in last_assistant for signal in RECAP_SIGNALS)
-        ):
-            await _incremental_extract(session_id, current_stage, last_assistant, user_id)
-            session = _store_get(session_id, user_id) or session
-            current_gaps = _stage_gaps(current_stage, session.get("extracted", {}))
+    # The lightweight judge also accepts natural confirmations such as
+    # "好的，以上都没问题". Commit the recap after that verdict, before
+    # applying the quality gate, so those confirmations behave like the
+    # one-word quick reply without ever committing unconfirmed content.
+    if (
+        advance
+        and commit_recap
+        and not recap_committed
+        and not force_advance
+        and last_assistant
+        and any(signal in last_assistant for signal in RECAP_SIGNALS)
+    ):
+        await _incremental_extract(session_id, current_stage, last_assistant, user_id)
+        session = _store_get(session_id, user_id) or session
+        current_gaps = _stage_gaps(current_stage, session.get("extracted", {}))
 
-        if advance and current_gaps and not force_advance:
-            next_stage = current_stage
-            advanced = False
-            blocked_gaps = current_gaps
-        elif (
-            advance
-            and current_stage == "experience_mining"
-            and not force_advance
-            and not _is_no_more_experience(user_message)
-        ):
-            # Confirming one experience completes that item, not the whole section.
-            # Ask for another experience before leaving the deepest resume section.
-            next_stage = current_stage
-            advanced = False
-            experience_confirmed = True
-        else:
-            next_stage = _next_stage(current_stage) if advance else current_stage
-            advanced = advance and next_stage != current_stage
+    if advance and current_gaps and not force_advance:
+        blocked_gaps = current_gaps
+    elif (
+        advance
+        and current_stage == "experience_mining"
+        and not force_advance
+        and not _is_no_more_experience(user_message)
+    ):
+        # Confirming one experience completes that item, not the whole section.
+        # Ask for another experience before leaving the deepest resume section.
+        experience_confirmed = True
+    elif advance:
+        # 板块完成(或在缺关键信息时主动跳过):回到板块选择,提示剩余板块。
+        skipped = bool(current_gaps)
+        progress = sections.mark_section(progress, current_stage, skipped=skipped)
+        return hub(just_finished=current_stage, skipped=skipped)
 
-    _store_stage(session_id, next_stage, user_id)
-
-    stage_hint = STAGE_HINTS.get(next_stage, "")
+    stage_hint = STAGE_HINTS.get(current_stage, "")
 
     if blocked_gaps:
         stage_hint += (
             "\n\n# 系统质量门槛（必须执行）\n"
-            f"用户刚才想确认，但当前阶段仍缺少：{'、'.join(blocked_gaps)}。\n"
+            f"用户刚才想确认，但当前板块仍缺少：{'、'.join(blocked_gaps)}。\n"
             "- 不要接受本次确认，也不要重复整段总结。\n"
             "- 先温和说明还差哪些关键信息，本轮只追问其中最重要的 1~2 项。\n"
             "- 问题必须具体，并给出可回忆的角度；用户确实没有时允许其明确说没有或主动跳过。"
@@ -592,35 +751,33 @@ async def prepare_stage_info(
             "\n\n# 当前经历已确认\n"
             "用户已确认刚才那一段经历。本轮不要重复 recap，也不要继续追问同一段。"
             "只询问是否还有第二段值得写入简历的经历，并提示课程项目、个人作品、实习兼职、"
-            "比赛、社团或志愿活动都可以。用户明确说没有其他经历后，系统会在下一轮推进。"
+            "比赛、社团或志愿活动都可以。用户明确说没有其他经历后，系统会记录该板块完成。"
         )
 
-    # 当阶段刚刚推进时,在 hint 末尾追加一条强约束,
-    # 防止 AI 因对话历史惯性又退回上一阶段重复 recap。
-    if advanced:
-        prev_label = STAGE_LABELS.get(current_stage, current_stage)
-        new_label = STAGE_LABELS.get(next_stage, next_stage)
-        stage_hint += (
-            f"\n\n⚠️ 注意:用户刚刚确认完成上一阶段「{prev_label}」,"
-            f"现在你必须立刻切换到「{new_label}」环节。\n"
-            f"- 严禁再次 recap 或讨论「{prev_label}」相关内容(无论对话历史里有多少相关讨论)。\n"
-            f"- 直接以一句过渡(例如\"好的,基本信息收到 ✅,接下来......\")开头,"
-            f"然后开始「{new_label}」的引导/提问。"
-        )
+    return finish(
+        current_stage,
+        hint=stage_hint,
+        quick=_decide_quick_replies(
+            current_stage,
+            gaps=blocked_gaps,
+            experience_confirmed=experience_confirmed,
+        ),
+    )
 
-    system_prompt = DIALOG_SYSTEM_PROMPT.format(
-        target_job=target_job or session.get("target_job") or "未指定岗位",
-        stage_hint=stage_hint
-    )
-    quick_replies = _decide_quick_replies(
-        next_stage,
-        gaps=blocked_gaps,
-        experience_confirmed=experience_confirmed,
-    )
-    # 重新读取:session 是 append_message 之前的快照,不含本轮用户消息。
-    # 直接用旧快照会导致首轮 messages 为空,LLM 请求被网关拒绝。
-    session = _store_get(session_id, user_id) or session
-    return session, next_stage, system_prompt, quick_replies
+
+def _response_payload(plan: TurnPlan, reply: str, session_id: str, user_id: Optional[str]) -> Dict:
+    # 把当前已确认并提交的结构化数据一并下发,未确认 recap 不会出现在右侧预览。
+    snapshot = _store_get(session_id, user_id)
+    extracted = snapshot.get("extracted", {}) if snapshot else {}
+    return {
+        "reply": reply,
+        "complete": True,
+        "stage": plan.stage,
+        "stage_label": STAGE_LABELS.get(plan.stage, ""),
+        "quick_replies": plan.quick_replies,
+        "extracted": extracted,
+        "progress": plan.progress,
+    }
 
 
 async def chat_stream(
@@ -629,6 +786,7 @@ async def chat_stream(
     user_message: str,
     user_msg_count: int,
     user_id: Optional[str] = None,
+    section: Optional[str] = None,
 ) -> AsyncGenerator[Tuple[str, str], None]:
     """Legacy SSE generator kept for internal compatibility tests.
 
@@ -641,12 +799,25 @@ async def chat_stream(
       - ('done', '{"stage": "...", "stage_label": "...", "quick_replies": [...]}')
       - ('error', '{"message": "..."}')
     """
-    session, next_stage, system_prompt, quick_replies = await prepare_stage_info(
+    plan = await plan_turn(
         session_id, target_job, user_message, user_msg_count, user_id,
-        commit_recap=True,
+        commit_recap=True, section=section,
     )
+    next_stage = plan.stage
+    system_prompt = plan.system_prompt
 
-    messages = _build_messages_for_llm(session)
+    if plan.canned_reply:
+        # 开场板块总览 / 板块完成提示 / 准备生成:由系统直接生成,不经过 LLM。
+        _store_append(session_id, "assistant", plan.canned_reply, user_id)
+        yield ("delta", json.dumps({"text": plan.canned_reply}, ensure_ascii=False))
+        payload = _response_payload(plan, plan.canned_reply, session_id, user_id)
+        yield ("done", json.dumps({
+            key: payload[key]
+            for key in ("stage", "stage_label", "quick_replies", "extracted", "progress")
+        }, ensure_ascii=False))
+        return
+
+    messages = _build_messages_for_llm(plan.session)
 
     full_reply_parts: List[str] = []
     try:
@@ -727,17 +898,12 @@ async def chat_stream(
         "has_recap": has_recap,
         "reply_len": len(full_reply),
     })
-    # 把当前已确认并提交的结构化数据一并下发，未确认 recap 不会出现在右侧预览。
-    extracted_snapshot = _store_get(session_id, user_id)
-    extracted = extracted_snapshot.get("extracted", {}) if extracted_snapshot else {}
-
+    payload = _response_payload(plan, full_reply, session_id, user_id)
     yield (
         "done",
         json.dumps({
-            "stage": next_stage,
-            "stage_label": STAGE_LABELS.get(next_stage, ""),
-            "quick_replies": quick_replies,
-            "extracted": extracted
+            key: payload[key]
+            for key in ("stage", "stage_label", "quick_replies", "extracted", "progress")
         }, ensure_ascii=False)
     )
 
@@ -748,14 +914,25 @@ async def chat_response(
     user_message: str,
     user_msg_count: int,
     user_id: Optional[str] = None,
+    section: Optional[str] = None,
 ) -> Dict:
     """Generate one complete, validated chat response (non-streaming)."""
-    session, next_stage, system_prompt, quick_replies = await prepare_stage_info(
+    plan = await plan_turn(
         session_id, target_job, user_message, user_msg_count, user_id,
-        commit_recap=True,
+        commit_recap=True, section=section,
     )
-    messages = _build_messages_for_llm(session)
-    structured_system = f"{system_prompt}\n\n{CHAT_RESPONSE_FORMAT}"
+    next_stage = plan.stage
+    if plan.canned_reply:
+        # 开场板块总览 / 板块完成提示 / 准备生成:由系统直接生成,不经过 LLM。
+        _store_append(session_id, "assistant", plan.canned_reply, user_id)
+        logger.info("chat_response_canned", extra={
+            "stage": next_stage,
+            "reply_len": len(plan.canned_reply),
+        })
+        return _response_payload(plan, plan.canned_reply, session_id, user_id)
+
+    messages = _build_messages_for_llm(plan.session)
+    structured_system = f"{plan.system_prompt}\n\n{CHAT_RESPONSE_FORMAT}"
     raw = ""
     parse_error = ""
     # A second pass repairs gateways/models that ignore the JSON-only contract.
@@ -784,21 +961,12 @@ async def chat_response(
             )
             reply = _parse_chat_response(raw)
             _store_append(session_id, "assistant", reply, user_id)
-            extracted_snapshot = _store_get(session_id, user_id)
-            extracted = extracted_snapshot.get("extracted", {}) if extracted_snapshot else {}
             logger.info("chat_response_done", extra={
                 "stage": next_stage,
                 "reply_len": len(reply),
                 "format_attempt": attempt + 1,
             })
-            return {
-                "reply": reply,
-                "complete": True,
-                "stage": next_stage,
-                "stage_label": STAGE_LABELS.get(next_stage, ""),
-                "quick_replies": quick_replies,
-                "extracted": extracted,
-            }
+            return _response_payload(plan, reply, session_id, user_id)
         except ValueError as exc:
             parse_error = str(exc)
             logger.warning("chat_response_invalid_format", extra={
@@ -819,22 +987,13 @@ async def chat_response(
                     reply = None
                 if reply:
                     _store_append(session_id, "assistant", reply, user_id)
-                    extracted_snapshot = _store_get(session_id, user_id)
-                    extracted = extracted_snapshot.get("extracted", {}) if extracted_snapshot else {}
                     logger.info("chat_response_done", extra={
                         "stage": next_stage,
                         "reply_len": len(reply),
                         "format_attempt": attempt + 1,
                         "accepted_length_stop": True,
                     })
-                    return {
-                        "reply": reply,
-                        "complete": True,
-                        "stage": next_stage,
-                        "stage_label": STAGE_LABELS.get(next_stage, ""),
-                        "quick_replies": quick_replies,
-                        "extracted": extracted,
-                    }
+                    return _response_payload(plan, reply, session_id, user_id)
             logger.warning("chat_response_truncated", extra={
                 "attempt": attempt + 1,
                 "reason": exc.reason,
@@ -1030,3 +1189,29 @@ AI 总结: \"\"\"{ai_recap}\"\"\"
             logger.info("incremental_extract_skills", extra={"data": data})
         except Exception as e:
             logger.warning("incremental_extract_skills_failed", extra={"error": str(e)})
+
+    elif extraction_stage == "self_evaluation":
+        prompt = f"""从下面 AI 的总结中,提取用户确认的自我评价文案,输出 JSON:
+AI 总结: \"\"\"{ai_recap}\"\"\"
+
+抽取规则:
+- 只保留最终确认的那一段自我评价正文(40~80 字),不要标题、不要“自我评价:”前缀。
+- 用户明确表示没有/跳过时,self_evaluation 填空字符串。
+
+输出格式(只输出 JSON,不要其他文字):
+{{"self_evaluation": "自我评价正文"}}
+"""
+        try:
+            raw = await llm_service.chat_complete(
+                [{"role": "user", "content": prompt}], temperature=0.1, max_tokens=300,
+                model=settings.LLM_MODEL_FAST, timeout=settings.LLM_TIMEOUT_FAST_SECONDS)
+            data = json.loads(_strip_code_fence(raw))
+            text = data.get("self_evaluation")
+            _store_extracted(
+                session_id,
+                {"self_evaluation": text.strip() if isinstance(text, str) else ""},
+                user_id,
+            )
+            logger.info("incremental_extract_self_evaluation", extra={"data": data})
+        except Exception as e:
+            logger.warning("incremental_extract_self_evaluation_failed", extra={"error": str(e)})

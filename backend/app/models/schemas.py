@@ -88,6 +88,21 @@ class AttachSessionRequest(BaseModel):
     target_job: str = Field("", max_length=100, description="会话目标岗位")
 
 
+class SessionLayoutRequest(BaseModel):
+    """对话中调整简历板块顺序(基本信息固定在页眉,不参与排序)。"""
+    session_id: str = Field(..., min_length=1, max_length=64)
+    section_order: List[Annotated[str, Field(min_length=1, max_length=32)]] = Field(
+        ..., max_length=20, description="正文板块 key 的新顺序"
+    )
+
+
+class ResumeLayoutRequest(BaseModel):
+    """对已生成简历调整板块顺序,不触发重新评分。"""
+    section_order: List[Annotated[str, Field(min_length=1, max_length=32)]] = Field(
+        ..., max_length=20, description="正文板块 key 的新顺序"
+    )
+
+
 # ============ Chat ============
 
 class ChatRequest(BaseModel):
@@ -96,6 +111,10 @@ class ChatRequest(BaseModel):
     target_job: str = Field("", max_length=100, description="用户目标岗位")
     user_message: str = Field(..., min_length=1, max_length=4000, description="用户本轮输入")
     user_msg_count: int = Field(..., ge=1, le=1000, description="用户消息总数(含本条)")
+    section: Optional[str] = Field(
+        None, max_length=32,
+        description="用户在板块面板/快捷选项中显式选择的板块 key,或 generate 表示生成简历",
+    )
 
 
 class ChatResponseMeta(BaseModel):
@@ -114,6 +133,8 @@ class ChatCompleteResponse(BaseModel):
     stage_label: str = ""
     quick_replies: List[str] = Field(default_factory=list)
     extracted: Dict[str, Any] = Field(default_factory=dict)
+    # 板块进度:{"completed": [...], "skipped": [...], "order": [...]}
+    progress: Dict[str, Any] = Field(default_factory=dict)
     fallback: bool = False
     fallback_reason: str = ""
 
@@ -218,6 +239,8 @@ class ResumeData(BaseModel):
     skills: ResumeSkills = Field(default_factory=ResumeSkills)
     awards: List[str] = []
     self_evaluation: str = ""
+    # 正文板块顺序(用户可调整),空列表表示默认顺序
+    section_order: List[str] = []
 
 
 # ============ Quality Report ============

@@ -3,103 +3,185 @@
  * 模拟 AI 对话回复 / 简历生成 / 质量评估
  * 真实接入时把这里的函数替换成 axios 调用后端 /api/* 即可
  */
+import {
+  RESUME_SECTIONS,
+  SECTION_LABELS,
+  HUB_STAGE,
+  READY_STAGE,
+  GENERATE_ACTION,
+  GENERATE_LABEL,
+  normalizeProgress,
+  remainingSections,
+  missingRequired,
+  canGenerate,
+  sectionKeyForLabel
+} from '@/content/resumeSections'
 
 /* ============ 1. 对话 Mock ============ */
 
 /**
- * 根据当前对话轮次和岗位意向，返回 AI 的下一句回复
- * @param {Object} params { targetJob, userMessage, userMsgCount }
- * @returns {Promise<{reply: string, stage: string, stageLabel?: string, quickReplies?: string[]}>}
+ * 板块式 demo 对话(与后端 app/mock/fallback.py 对齐):
+ *  开场列出简历板块 → 用户选一块 → 该板块只问一句,任意回复即视为完成 →
+ *  回到"选择板块"并提示剩余板块 → 必填板块完成后可"生成简历"。
+ *
+ * mock 模式没有服务端会话,板块进度保存在模块级变量里,按 sessionId 隔离。
  */
-export function mockChatReply({ targetJob, userMessage, userMsgCount }) {
-  return new Promise(resolve => {
-    setTimeout(() => {
-      const script = buildDialogScript(targetJob)
-      const idx = Math.min(userMsgCount - 1, script.length - 1)
-      resolve(script[idx])
-    }, 600 + Math.random() * 400)
-  })
+const mockSessions = new Map()
+
+const MOCK_SECTION_PROMPTS = {
+  basic_info: {
+    reply: '好的，我们先来认识一下你 👋\n\n方便告诉我你的**姓名**、**联系方式**（手机或邮箱）和**所在城市**吗？一句话简单说就行，比如："我叫李同学，手机 138xxxx，邮箱 xx@qq.com，在上海"。',
+    quickReplies: ['李同学，138 0000 0000，上海', '我先不填手机，只留邮箱', '跳过']
+  },
+  education: {
+    reply: '好的，聊聊你的**教育背景** 🎓\n\n请告诉我你的**学校**、**专业**、**学历**和**预计毕业时间**。如果有 GPA、专业排名、关键课程也可以一起说。\n\n比如："我是某 985 大学计算机科学专业本科，2025 年 6 月毕业，GPA 3.7"。',
+    quickReplies: ['本科 2025 届', '硕士 2025 届', '我还在大二/大三']
+  },
+  experience_mining: {
+    reply: '这是简历最关键的部分 ✨\n\n**大学期间，哪个课程作业 / 项目 / 实习 / 比赛 / 社团活动让你印象最深刻？**\n\n哪怕只是一次课堂实验、一个小工具、一段志愿服务都可以——很多看似平常的经历，经过 STAR-L 重塑后会非常出彩。',
+    quickReplies: ['做过一个课程项目', '参加过一场比赛', '有过实习经历', '参加过社团']
+  },
+  skills: {
+    reply: '来整理你的**专业技能** 🛠️\n\n请告诉我你掌握的**技术栈 / 工具 / 软件 / 语言**，分类列举即可。\n\n比如：\n• 技术栈：Java、Spring Boot、MySQL、Redis\n• 工具：Git、Linux、VSCode\n• 软技能：项目管理、跨部门沟通',
+    quickReplies: ['让 AI 根据经历推断', '我有一份技能清单', '不确定怎么填']
+  },
+  awards: {
+    reply: '说说你的**获奖与荣誉**（可选）🏅\n\n有没有**奖学金、竞赛奖项、证书**之类的？如果有就简单列举一下，没有的话可以直接说"没有"。',
+    quickReplies: ['获得过奖学金', '有比赛获奖', '考过相关证书', '没有获奖经历']
+  },
+  self_evaluation: {
+    reply: '最后是**自我评价**（可选）✍️\n\n用一两句话概括你的核心优势或求职期待，也可以告诉我想突出的方向，我来帮你起草。',
+    quickReplies: ['帮我根据经历起草', '我自己说说优势', '跳过这部分']
+  }
+}
+
+const STAGE_LABELS = { ...SECTION_LABELS, [HUB_STAGE]: '选择板块', [READY_STAGE]: '准备生成' }
+
+function sectionLine(s, withDesc = false) {
+  const tag = s.required ? '（必填）' : ''
+  return `• **${s.label}**${tag}${withDesc ? `：${s.desc}` : ''}`
+}
+
+function hubQuickReplies(progress) {
+  const replies = remainingSections(progress).map(s => s.label)
+  if (canGenerate(progress)) replies.push(GENERATE_LABEL)
+  return replies
+}
+
+function buildOverviewReply(targetJob) {
+  const job = targetJob || '目标岗位'
+  return `你好！欢迎使用识光简历 ✈️\n\n你想做「**${job}**」，这是个很有发展空间的方向。接下来我会像聊天一样，帮你把简历一块一块地搭起来。\n\n一份完整的简历通常包含这些板块：\n${RESUME_SECTIONS.map(s => sectionLine(s, true)).join('\n')}\n\n不用按顺序来——**你想先从哪一块开始？** 点击下方选项，或者直接告诉我。\n每完成一块，我都会把它写进右侧的简历；正文里各板块的先后位置也可以随时调整，例如教育背景不够突出，就可以把它挪到简历末尾。`
+}
+
+function buildHubReply(progress, { justFinished = null, skipped = false, blockedGenerate = false, unclear = false } = {}) {
+  const remaining = remainingSections(progress)
+  const missing = missingRequired(progress)
+  const parts = []
+  if (justFinished) {
+    const label = SECTION_LABELS[justFinished] || justFinished
+    parts.push(skipped
+      ? `好的，已跳过「**${label}**」，之后随时可以回来补充。`
+      : `✅ **「${label}」已完成**，已写入右侧简历。`)
+  } else if (blockedGenerate) {
+    parts.push(`生成简历前还需要先完成必填板块：${missing.map(s => `**${s.label}**`).join('、')}。`)
+  } else if (unclear) {
+    parts.push('我暂时没看出你想先做哪一块 🤔')
+  }
+  if (remaining.length) {
+    parts.push('还剩下这些板块：\n' + remaining.map(s => sectionLine(s)).join('\n'))
+    if (missing.length) {
+      parts.push(justFinished || unclear
+        ? '接下来想做哪一块？点击下方选项即可，必填板块完成后就可以生成简历。'
+        : '先从哪一块开始？点击下方选项即可。')
+    } else {
+      parts.push('必填板块都已完成，你可以继续补充剩余板块，也可以现在就点击「生成简历」。')
+    }
+  } else {
+    parts.push('🎉 所有板块都已完成！可以点击「生成简历」，或者点击任意板块继续补充修改。')
+  }
+  return parts.join('\n\n')
+}
+
+function inferSection(text) {
+  const clean = (text || '').trim()
+  const exact = sectionKeyForLabel(clean)
+  if (exact) return exact
+  const keywords = {
+    basic_info: ['基本信息', '联系方式', '姓名', '手机', '邮箱', '我叫'],
+    education: ['教育', '学校', '学历', '专业', '大学', '毕业', '本科', '硕士'],
+    experience_mining: ['经历', '项目', '实习', '比赛', '社团', '兼职', '志愿'],
+    skills: ['技能', '技术栈', '工具', '掌握', '熟悉'],
+    awards: ['获奖', '奖学金', '奖项', '荣誉', '证书'],
+    self_evaluation: ['自我评价', '自评', '优势', '自我介绍']
+  }
+  let best = null
+  let bestScore = 0
+  let tie = false
+  for (const [key, words] of Object.entries(keywords)) {
+    const score = words.filter(w => clean.includes(w)).length
+    if (score > bestScore) { best = key; bestScore = score; tie = false }
+    else if (score === bestScore && score > 0) tie = true
+  }
+  return bestScore > 0 && !tie ? best : null
+}
+
+function isGenerateRequest(text) {
+  const clean = (text || '').trim()
+  return clean === GENERATE_LABEL || (clean.length <= 16 && /生成/.test(clean))
+}
+
+function payload(stage, reply, quickReplies, progress) {
+  return { reply, stage, stageLabel: STAGE_LABELS[stage] || '', quickReplies, progress }
 }
 
 /**
- * 完整简历对话流程（按真实写简历顺序）：
- *  ① 基本信息 → ② 教育背景 → ③ 项目经历（多轮 STAR-L 追问）→ ④ 技能 → ⑤ 获奖 → ⑥ 准备生成
- *
- * 阶段标签用于驱动顶部进度条：
- *  - basic_info       基本信息
- *  - education        教育背景
- *  - experience_mining 项目经历
- *  - skills           技能
- *  - awards           获奖
- *  - ready_to_generate 准备生成
+ * 根据当前板块进度和用户输入，返回 AI 的下一句回复
+ * @param {Object} params { sessionId, targetJob, userMessage, userMsgCount, section? }
+ * @returns {Promise<{reply, stage, stageLabel, quickReplies, progress}>}
  */
-function buildDialogScript(targetJob) {
-  const job = targetJob || '产品经理'
-  return [
-    // 用户第 1 句（自动发送：我想做xxx）—— 开场 + 问基本信息
-    {
-      reply: `你好！欢迎使用识光简历 ✈️\n\n你想做「**${job}**」，这是个很有发展空间的方向。接下来我会像聊天一样，一步步帮你梳理简历内容。\n\n**第一步：先认识一下你**\n方便告诉我你的**姓名**、**联系方式**（手机或邮箱）和**所在城市**吗？一句话简单说就行，比如："我叫李同学，手机 138xxxx，邮箱 xx@qq.com，在上海"。`,
-      stage: 'basic_info',
-      stageLabel: '基本信息',
-      quickReplies: ['李同学，138 0000 0000，上海', '我先不填，直接开始', '只想填邮箱可以吗']
-    },
-    // 用户第 2 句（基本信息）—— 问教育背景
-    {
-      reply: `好的，记下来啦 ✅\n\n**第二步：你的教育背景**\n请告诉我你的**学校**、**专业**、**学历**和**预计毕业时间**。如果有 GPA、专业排名、关键课程也可以一起说。\n\n比如："我是某 985 大学计算机科学专业本科，2025 年 6 月毕业，GPA 3.7"。`,
-      stage: 'education',
-      stageLabel: '教育背景',
-      quickReplies: ['本科 2025 届', '硕士 2025 届', '我还在大二/大三']
-    },
-    // 用户第 3 句（教育背景）—— 问项目/课程/实习经历
-    {
-      reply: `教育背景已收到 🎓\n\n**第三步：挖掘你的经历**\n这是简历最关键的部分。**大学期间，哪个课程作业 / 项目 / 实习 / 比赛 / 社团活动让你印象最深刻？**\n\n哪怕只是一次课堂实验、一个小工具、一段志愿服务都可以——很多看似平常的经历，经过 STAR-L 重塑后会非常出彩。`,
-      stage: 'experience_mining',
-      stageLabel: '项目经历',
-      quickReplies: ['做过一个课程项目', '参加过一场比赛', '有过实习经历', '参加过社团']
-    },
-    // 用户第 4 句（说了一段经历）—— STAR-L：S + T
-    {
-      reply: `这段经历很有挖掘价值 ✨\n\n我来用 **STAR-L 法则**深入了解一下：\n\n• **背景（S）**：这个项目是在什么背景下做的？要解决什么问题？\n• **角色（T）**：你**具体负责哪一部分**？团队里你的角色是什么？\n\n一句话简单说说就行。`,
-      stage: 'experience_mining',
-      stageLabel: '项目经历',
-      quickReplies: ['是课程要求的', '自己感兴趣发起的', '老师指定的课题']
-    },
-    // 用户第 5 句（回答了 S/T）—— 追问 A + R
-    {
-      reply: `思路很清晰！再继续聊聊：\n\n• **行动（A）**：你用了**什么工具或方法**？过程中遇到过什么困难，是怎么解决的？\n• **成果（R）**：最终的成果是什么？有没有**具体数据**（用户数、效率提升、得分、获奖等）？\n\n数据越具体越好——这是简历的"金字招牌"。`,
-      stage: 'experience_mining',
-      stageLabel: '项目经历',
-      quickReplies: ['用了 Python/Vue 等技术', '遇到过技术难题', '成果还不错']
-    },
-    // 用户第 6 句（回答了 A/R）—— 追问 L + 询问是否还有其他经历
-    {
-      reply: `太棒了！最后一个问题：**做完这个项目，你最大的收获是什么（L）？** 是技术能力的提升，还是方法论的成长？\n\n另外，**你还有其他经历**吗？比如其他课程项目、实习、社团、志愿服务……越多越好。`,
-      stage: 'experience_mining',
-      stageLabel: '项目经历',
-      quickReplies: ['还有一段比赛经历', '有一段社团经历', '就这些了']
-    },
-    // 用户第 7 句（回答了 L + 提到/没提到其他经历）—— 询问技能
-    {
-      reply: `我已经记下你的几段经历了 📒\n\n**第四步：你的技能清单**\n请告诉我你掌握的**技术栈 / 工具 / 软件 / 语言**，分类列举即可。\n\n比如：\n• 技术栈：Java、Spring Boot、MySQL、Redis\n• 工具：Git、Linux、VSCode\n• 软技能：项目管理、跨部门沟通`,
-      stage: 'skills',
-      stageLabel: '技能',
-      quickReplies: ['让 AI 根据经历推断', '我有一份技能清单', '不确定怎么填']
-    },
-    // 用户第 8 句（说了技能）—— 询问获奖
-    {
-      reply: `技能记录完毕 🛠️\n\n**第五步：获奖与荣誉（可选）**\n你有什么**奖学金、竞赛奖项、证书**之类的吗？如果有就简单列举一下，没有的话可以直接说"没有"，我们继续下一步。`,
-      stage: 'awards',
-      stageLabel: '获奖',
-      quickReplies: ['获得过奖学金', '有比赛获奖', '考过相关证书', '没有获奖经历']
-    },
-    // 用户第 9 句（说了获奖/没有）—— 触发生成
-    {
-      reply: `好的，所有信息都收集齐了 🎯\n\n我对你的整体画像已经有了清晰的了解：\n• **基本信息** ✅\n• **教育背景** ✅\n• **项目/经历**（含 STAR-L 细节）✅\n• **技能清单** ✅\n• **获奖荣誉** ✅\n\n接下来我会用 STAR-L 法则重塑你的经历描述，生成一份**专业、量化、可信**的简历，并附上五维质量评估报告。\n\n稍等几秒……`,
-      stage: 'ready_to_generate',
-      stageLabel: '准备生成',
-      quickReplies: []
-    }
-  ]
+export function mockChatReply({ sessionId, targetJob, userMessage, userMsgCount, section }) {
+  return new Promise(resolve => {
+    setTimeout(() => {
+      const key = sessionId || 'default'
+      const state = mockSessions.get(key) || { stage: HUB_STAGE, progress: normalizeProgress({}), started: false }
+      const done = (result) => {
+        mockSessions.set(key, { stage: result.stage, progress: result.progress, started: true })
+        resolve(result)
+      }
+      const hub = (opts) => payload(HUB_STAGE, buildHubReply(state.progress, opts), hubQuickReplies(state.progress), state.progress)
+
+      if (userMsgCount <= 1 || !state.started) {
+        state.progress = normalizeProgress({})
+        return done(payload(HUB_STAGE, buildOverviewReply(targetJob), hubQuickReplies(state.progress), state.progress))
+      }
+
+      const explicit = section === GENERATE_ACTION || SECTION_LABELS[section] ? section : null
+      if (explicit === GENERATE_ACTION || isGenerateRequest(userMessage)) {
+        if (canGenerate(state.progress)) return done(payload(READY_STAGE, '好的，信息收集完成 🎯\n\n我会用 STAR-L 法则重塑你的经历描述，生成一份**专业、量化、可信**的简历，并附上五维质量评估报告。稍等几秒……', [], state.progress))
+        return done(hub({ blockedGenerate: true }))
+      }
+
+      const atHub = state.stage === HUB_STAGE || state.stage === READY_STAGE
+      const chosen = explicit || (atHub ? inferSection(userMessage) : null)
+      if (chosen && (atHub || chosen !== state.stage)) {
+        const prompt = MOCK_SECTION_PROMPTS[chosen]
+        return done(payload(chosen, prompt.reply, prompt.quickReplies, state.progress))
+      }
+      if (atHub) return done(hub({ unclear: true }))
+
+      // 板块内：demo 模式不做真实提取，用户任意回复即视为完成该板块。
+      const skipped = /跳过/.test(userMessage || '')
+      const current = state.stage
+      const completed = state.progress.completed.filter(k => k !== current)
+      const skippedList = state.progress.skipped.filter(k => k !== current)
+      if (skipped) skippedList.push(current)
+      else completed.push(current)
+      state.progress = normalizeProgress({ ...state.progress, completed, skipped: skippedList })
+      let reply = buildHubReply(state.progress, { justFinished: current, skipped })
+      if (!skipped) reply = '记下来啦 ✅（演示模式不会真正提取信息）\n\n' + reply
+      done(payload(HUB_STAGE, reply, hubQuickReplies(state.progress), state.progress))
+    }, 600 + Math.random() * 400)
+  })
 }
 
 /* ============ 2. 简历生成 Mock ============ */

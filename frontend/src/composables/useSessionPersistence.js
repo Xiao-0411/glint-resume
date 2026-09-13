@@ -23,6 +23,7 @@ export function useSessionPersistence() {
         sessionId: chat.sessionId,
         targetJob: chat.targetJob,
         currentStage: chat.currentStage,
+        progress: chat.progress,
         messages: chat.messages,
         userProfile: chat.userProfile,
         extractedProfile: chat.extractedProfile,
@@ -112,7 +113,8 @@ function snapshotFromBackend(data) {
   return {
     sessionId: session?.session_id || latestResume?.session_id || '',
     targetJob: session?.target_job || latestResume?.target_job || '',
-    currentStage: session?.stage || 'basic_info',
+    currentStage: session?.stage || 'section_select',
+    progress: session?.progress || {},
     messages,
     extractedProfile: session?.extracted || {},
     resumeData: latestResume?.resume || null,

@@ -1,6 +1,6 @@
 <template>
   <div class="chat-layout">
-    <!-- 顶部：返回 + 目标岗位 + 横向 stepper -->
+    <!-- 顶部：返回 + 目标岗位 + 板块面板（可点击任意板块进入，不按固定顺序） -->
     <header class="topbar">
       <button class="back-btn" @click="goBack" title="返回首页">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -12,22 +12,41 @@
         <span class="topbar-title">{{ store.targetJob || '对话中' }}</span>
       </div>
 
-      <ol class="stepper">
-        <li
-          v-for="(s, idx) in steps"
+      <div class="section-panel" role="group" aria-label="简历板块">
+        <button
+          v-for="s in sections"
           :key="s.key"
-          :class="['step', stepStatus(idx)]"
+          type="button"
+          :class="['section-block', sectionStatus(s.key)]"
+          :disabled="busy"
+          :title="sectionTitle(s)"
+          @click="onPickSection(s)"
         >
-          <div class="step-circle">
-            <svg v-if="stepStatus(idx) === 'done'" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+          <span class="block-icon">
+            <svg v-if="sectionStatus(s.key) === 'done'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="20 6 9 17 4 12"/>
             </svg>
-            <span v-else>{{ idx + 1 }}</span>
-          </div>
-          <span class="step-label">{{ s.label }}</span>
-          <span v-if="idx < steps.length - 1" class="step-connector"></span>
-        </li>
-      </ol>
+            <svg v-else-if="sectionStatus(s.key) === 'skipped'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            <span v-else class="block-dot"></span>
+          </span>
+          <span class="block-label">{{ s.label }}</span>
+          <span v-if="s.required" class="block-required">必填</span>
+        </button>
+        <button
+          type="button"
+          class="generate-block"
+          :disabled="busy || !canGenerateNow"
+          :title="canGenerateNow ? '必填板块已完成，可以生成简历' : '完成「基本信息」和「项目经历」后即可生成'"
+          @click="onGenerateClick"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2l2.4 5.6L20 8.5l-4.3 3.9L17 18l-5-2.8L7 18l1.3-5.6L4 8.5l5.6-.9z"/>
+          </svg>
+          <span>生成简历</span>
+        </button>
+      </div>
     </header>
 
     <!-- 主体：左对话 / 右简历 -->
@@ -97,12 +116,15 @@
         </footer>
       </section>
 
-      <!-- 右：实时简历 -->
+      <!-- 右：实时简历（板块顺序可调整） -->
       <aside class="resume-pane">
         <LiveResumePreview
           :target-job="store.targetJob"
           :completed-sections="completedSections"
           :profile="store.extractedProfile"
+          :section-order="store.sectionOrder"
+          :reorderable="true"
+          @move-section="onMoveSection"
         />
       </aside>
     </div>
@@ -122,7 +144,15 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
-import { chatApi, resumeApi, apiMode } from '@/api'
+import { chatApi, resumeApi, sessionApi, apiMode } from '@/api'
+import {
+  RESUME_SECTIONS,
+  READY_STAGE,
+  GENERATE_ACTION,
+  GENERATE_LABEL,
+  sectionKeyForLabel,
+  canGenerate
+} from '@/content/resumeSections'
 import ChatBubble from '@/components/ChatBubble.vue'
 import LoadingOverlay from '@/components/LoadingOverlay.vue'
 import LiveResumePreview from '@/components/LiveResumePreview.vue'
@@ -143,15 +173,12 @@ const needLogin = ref(false)
 const currentQuickReplies = ref([])
 let streamController = null
 
-const steps = [
-  { key: 'basic_info', label: '基本信息' },
-  { key: 'education', label: '教育背景' },
-  { key: 'experience_mining', label: '项目经历' },
-  { key: 'skills_awards', label: '技能荣誉' }
-]
+// 简历板块：没有固定顺序，用户点击任意板块即可开始/回到该板块
+const sections = RESUME_SECTIONS
 
 const busy = computed(() => aiThinking.value || streamingActive.value || generating.value)
 const canSend = computed(() => text.value.trim().length > 0 && !busy.value)
+const canGenerateNow = computed(() => canGenerate(store.progress))
 
 const lastAiIdx = computed(() => {
   for (let i = store.messages.length - 1; i >= 0; i--) {
@@ -160,8 +187,18 @@ const lastAiIdx = computed(() => {
   return -1
 })
 
-// 只按后端已确认并提交的结构化数据展示；尚无真实数据的 mock 流程仍按
-// stage 展示示例排版。
+// 板块 key → 预览组件的 section 名
+const PREVIEW_KEYS = {
+  basic_info: 'basic',
+  education: 'education',
+  experience_mining: 'experiences',
+  skills: 'skills',
+  awards: 'awards',
+  self_evaluation: 'self_evaluation'
+}
+
+// 只按后端已确认并提交的结构化数据展示；尚无真实数据的 mock 流程按
+// 已完成板块展示示例排版。
 const completedSections = computed(() => {
   const profile = store.extractedProfile || {}
   const skills = profile.skills || {}
@@ -176,35 +213,30 @@ const completedSections = computed(() => {
     (Array.isArray(skills.soft) && skills.soft.length)
   ) populated.push('skills')
   if (Array.isArray(profile.awards) && profile.awards.length) populated.push('awards')
+  if (typeof profile.self_evaluation === 'string' && profile.self_evaluation.trim()) populated.push('self_evaluation')
   if (populated.length) return populated
 
   // In real backend mode, an empty snapshot means nothing has been confirmed
-  // yet. Do not unlock sample sections merely because the state machine moved
-  // stages. Mock mode keeps its illustrative layout for offline demos.
+  // yet. Do not unlock sample sections merely because a section was marked
+  // done. Mock mode keeps its illustrative layout for offline demos.
   if (apiMode !== 'mock') return []
-
-  const stage = store.currentStage
-  if (stage === 'basic_info') return []
-  if (stage === 'education') return ['basic']
-  if (stage === 'experience_mining') return ['basic', 'education']
-  if (stage === 'awards') return ['basic', 'education', 'experiences']
-  if (stage === 'skills') return ['basic', 'education', 'experiences', 'awards']
-  if (stage === 'ready_to_generate') return ['basic', 'education', 'experiences', 'skills', 'awards']
-  return []
+  return (store.progress?.completed || []).map(k => PREVIEW_KEYS[k]).filter(Boolean)
 })
 
-function stepStatus(idx) {
-  const stage = store.currentStage
-  const currentStepIdx = (() => {
-    if (stage === 'basic_info') return 0
-    if (stage === 'education') return 1
-    if (stage === 'experience_mining') return 2
-    if (stage === 'awards' || stage === 'skills' || stage === 'ready_to_generate') return 3
-    return 0
-  })()
-  if (idx < currentStepIdx) return 'done'
-  if (idx === currentStepIdx) return 'active'
+function sectionStatus(key) {
+  if (store.currentStage === key) return 'active'
+  const progress = store.progress || {}
+  if ((progress.completed || []).includes(key)) return 'done'
+  if ((progress.skipped || []).includes(key)) return 'skipped'
   return 'pending'
+}
+
+function sectionTitle(s) {
+  const status = sectionStatus(s.key)
+  if (status === 'active') return `正在填写「${s.label}」`
+  if (status === 'done') return `「${s.label}」已完成，点击可补充修改`
+  if (status === 'skipped') return `「${s.label}」已跳过，点击可回来补充`
+  return `${s.desc}（点击开始）`
 }
 
 onMounted(async () => {
@@ -228,10 +260,30 @@ function onSend() {
 }
 
 function onQuickReply(text) {
-  sendUserMessage(text)
+  // 快捷选项若是板块名/「生成简历」，带上显式 section，后端无需猜测
+  sendUserMessage(text, { section: sectionKeyForLabel(text) })
 }
 
-async function sendUserMessage(text) {
+function onPickSection(s) {
+  if (busy.value) return
+  sendUserMessage(s.label, { section: s.key })
+}
+
+function onGenerateClick() {
+  if (busy.value || !canGenerateNow.value) return
+  sendUserMessage(GENERATE_LABEL, { section: GENERATE_ACTION })
+}
+
+async function onMoveSection({ key, direction }) {
+  const order = store.moveSection(key, direction)
+  try {
+    await sessionApi.updateLayout({ sessionId: store.sessionId, sectionOrder: order })
+  } catch {
+    // 远端保存失败不影响本地预览；生成简历时会再次携带当前顺序。
+  }
+}
+
+async function sendUserMessage(text, { section = null } = {}) {
   if (busy.value) return
 
   store.pushMessage('user', text)
@@ -252,6 +304,7 @@ async function sendUserMessage(text) {
         targetJob: store.targetJob,
         userMessage: text,
         userMsgCount: store.userMessageCount,
+        section,
         signal: streamController.signal
       },
       {
@@ -267,6 +320,7 @@ async function sendUserMessage(text) {
         onDone: (meta) => {
           streamingActive.value = false
           store.setStage(meta.stage)
+          if (meta.progress) store.setProgress(meta.progress)
           if (meta.extracted) store.setExtracted(meta.extracted)
           currentQuickReplies.value = meta.quickReplies || []
 
@@ -283,7 +337,7 @@ async function sendUserMessage(text) {
             store.pushMessage('ai', `⚠️ ${reason}`, { isFallbackNotice: true })
           }
 
-          if (meta.stage === 'ready_to_generate') {
+          if (meta.stage === READY_STAGE) {
             triggerGenerate()
           }
         },
@@ -489,92 +543,143 @@ watch(() => store.messages.length, scrollToBottom)
   white-space: nowrap;
 }
 
-/* ============ 横向 Stepper ============ */
-.stepper {
+/* ============ 板块面板（一块一块，可点击任意板块） ============ */
+.section-panel {
   display: flex;
   align-items: center;
-  list-style: none;
-  gap: 0;
+  flex-wrap: wrap;
+  gap: 8px;
   flex-shrink: 0;
+  justify-content: flex-end;
 }
 
-.step {
+.section-block {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  position: relative;
-  transition: all 0.3s var(--ease-out);
+  gap: 7px;
+  padding: 7px 12px 7px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-card);
+  border: 1.5px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 0.88rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.22s var(--ease-out);
 }
 
-.step-circle {
-  width: 28px;
-  height: 28px;
+.section-block:hover:not(:disabled) {
+  border-color: rgba(37, 99, 235, 0.35);
+  color: var(--color-primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.section-block:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.block-icon {
+  width: 18px;
+  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  font-size: 0.85rem;
-  font-weight: 700;
-  flex-shrink: 0;
-  background: var(--color-bg-card);
+  background: rgba(15, 23, 42, 0.06);
   color: var(--color-text-muted);
-  border: 1.5px solid var(--color-border);
-  transition: all 0.25s var(--ease-out);
+  flex-shrink: 0;
+  transition: all 0.22s var(--ease-out);
 }
 
-.step.active .step-circle {
+.block-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+.block-required {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #B45309;
+}
+
+.section-block.active {
   background: var(--gradient-primary);
-  color: white;
   border-color: transparent;
+  color: white;
   box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.14), 0 2px 6px rgba(37, 99, 235, 0.28);
-  animation: pulseStep 2s ease-in-out infinite;
+  animation: pulseBlock 2s ease-in-out infinite;
 }
 
-@keyframes pulseStep {
+.section-block.active .block-icon {
+  background: rgba(255, 255, 255, 0.22);
+  color: white;
+}
+
+.section-block.active .block-required {
+  background: rgba(255, 255, 255, 0.22);
+  color: white;
+}
+
+@keyframes pulseBlock {
   0%, 100% { box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.14), 0 2px 6px rgba(37, 99, 235, 0.28); }
   50% { box-shadow: 0 0 0 7px rgba(37, 99, 235, 0.08), 0 2px 6px rgba(37, 99, 235, 0.28); }
 }
 
-.step.done .step-circle {
+.section-block.done {
+  border-color: rgba(5, 150, 105, 0.35);
+  color: var(--color-text);
+}
+
+.section-block.done .block-icon {
   background: var(--color-success);
   color: white;
-  border-color: var(--color-success);
-  box-shadow: 0 2px 4px rgba(5, 150, 105, 0.20);
 }
 
-.step.pending .step-circle {
-  opacity: 0.6;
-}
-
-.step-label {
-  font-size: 0.92rem;
-  font-weight: 600;
-  color: var(--color-text);
-  letter-spacing: -0.1px;
-  white-space: nowrap;
-}
-
-.step.pending .step-label {
+.section-block.skipped {
+  border-style: dashed;
   color: var(--color-text-muted);
+}
+
+.section-block.pending .block-label {
   font-weight: 500;
 }
 
-.step.done .step-label {
-  color: var(--color-text-secondary);
+.generate-block {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  margin-left: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--gradient-primary);
+  color: white;
+  font-size: 0.88rem;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: var(--shadow-primary);
+  transition: all 0.22s var(--ease-out);
 }
 
-.step-connector {
-  display: inline-block;
-  width: 40px;
-  height: 2px;
-  margin: 0 14px;
+.generate-block:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-primary-strong);
+}
+
+.generate-block:disabled {
   background: var(--color-border);
-  border-radius: 2px;
-  transition: background 0.4s var(--ease-out);
-}
-
-.step.done .step-connector {
-  background: linear-gradient(90deg, var(--color-success), var(--color-border));
+  color: var(--color-text-muted);
+  box-shadow: none;
+  cursor: not-allowed;
 }
 
 /* ============ 主体网格 ============ */
@@ -860,12 +965,12 @@ watch(() => store.messages.length, scrollToBottom)
 
 /* ============ 响应式 ============ */
 @media (max-width: 1100px) {
-  .step-label {
-    display: none;
+  .section-block {
+    padding: 6px 9px 6px 7px;
+    font-size: 0.8rem;
   }
-  .step-connector {
-    width: 22px;
-    margin: 0 8px;
+  .block-required {
+    display: none;
   }
   .main-grid {
     grid-template-columns: minmax(0, 1fr) minmax(360px, 40vw);
@@ -887,6 +992,11 @@ watch(() => store.messages.length, scrollToBottom)
   .topbar {
     padding: 10px 16px;
     gap: 12px;
+    flex-wrap: wrap;
+  }
+  .section-panel {
+    width: 100%;
+    justify-content: flex-start;
   }
   .chat-area {
     padding: 16px 12px 8px;

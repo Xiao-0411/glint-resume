@@ -21,7 +21,8 @@ class SessionStore:
                     "created_at": time.time(),
                     "messages": [],   # [{"role": "user"|"assistant", "content": "..."}]
                     "stage": "basic_info",
-                    "extracted": {}    # 增量抽取的结构化数据
+                    "extracted": {},   # 增量抽取的结构化数据
+                    "progress": {}     # 板块进度: completed / skipped / order
                 }
             elif target_job and not self._data[session_id].get("target_job"):
                 self._data[session_id]["target_job"] = target_job
@@ -48,6 +49,12 @@ class SessionStore:
             sess = self._data.get(session_id)
             if sess is not None:
                 sess["extracted"].update(info)
+
+    def update_progress(self, session_id: str, progress: Dict[str, Any]):
+        with self._lock:
+            sess = self._data.get(session_id)
+            if sess is not None:
+                sess["progress"] = dict(progress or {})
 
     def list_sessions(self) -> List[str]:
         return list(self._data.keys())

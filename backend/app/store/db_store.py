@@ -204,6 +204,29 @@ class SessionStore:
         finally:
             db.close()
 
+    def update_progress(
+        self,
+        session_id: str,
+        progress: Dict[str, Any],
+        user_id: Optional[str] = None,
+    ):
+        """Replace the section progress snapshot (completed / skipped / order)."""
+        db = SessionLocal()
+        try:
+            sess = (
+                db.query(Session)
+                .filter(Session.id == session_id)
+                .with_for_update()
+                .first()
+            )
+            if sess:
+                self._assert_owner(sess, self._owner_id(user_id))
+                sess.progress = dict(progress or {})
+                sess.updated_at = self._now()
+                db.commit()
+        finally:
+            db.close()
+
     def list_sessions(self, user_id: Optional[str] = None) -> List[str]:
         db = SessionLocal()
         try:
@@ -383,6 +406,32 @@ class SessionStore:
         finally:
             db.close()
 
+    def update_resume_layout(
+        self,
+        resume_id: int,
+        user_id: str,
+        section_order: List[str],
+    ) -> Optional[Dict]:
+        """Persist the user's section order on an already saved resume."""
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(Resume)
+                .filter(Resume.id == resume_id, Resume.user_id == user_id)
+                .with_for_update()
+                .first()
+            )
+            if row is None:
+                return None
+            resume_json = dict(row.resume_json or {})
+            resume_json["section_order"] = list(section_order)
+            row.resume_json = resume_json
+            db.commit()
+            db.refresh(row)
+            return self._resume_to_dict(row)
+        finally:
+            db.close()
+
     def _to_dict(self, sess: Session) -> Dict[str, Any]:
         return {
             "session_id": sess.id,
@@ -395,6 +444,7 @@ class SessionStore:
             ],
             "stage": sess.stage,
             "extracted": sess.extracted or {},
+            "progress": sess.progress or {},
         }
 
     def _resume_to_dict(self, resume: Resume) -> Dict:

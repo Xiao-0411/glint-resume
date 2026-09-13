@@ -370,10 +370,12 @@ async function restoreLatestResume() {
       sessionId: session?.session_id || latestResume.session_id || '',
       targetJob: session?.target_job || latestResume.target_job || '',
       currentStage: session?.stage || 'ready_to_generate',
+      progress: session?.progress || {},
       messages,
       extractedProfile: session?.extracted || {},
       resumeData: latestResume.resume,
-      qualityReport: latestResume.quality_report
+      qualityReport: latestResume.quality_report,
+      currentResumeId: latestResume.id || null
     })
     return true
   } catch {

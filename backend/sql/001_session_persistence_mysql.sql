@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   target_job VARCHAR(128) NOT NULL DEFAULT '',
   stage VARCHAR(32) NOT NULL DEFAULT 'basic_info',
   extracted JSON NULL,
+  progress JSON NULL,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
   INDEX ix_sessions_user_id (user_id),
