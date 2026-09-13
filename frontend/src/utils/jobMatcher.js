@@ -47,29 +47,42 @@ const JOB_KEYWORDS = [
 
 /**
  * 从用户输入中提取岗位名
+ *
+ * 原则：**不缩短用户写的岗位**。
+ * 词库只用来把「我想做产品经理的工作」这类句子里的岗位摘出来，
+ * 绝不能把「市场运营」匹配成词库里的短词「运营」——那是在改用户的岗位意向。
+ * 因此匹配只在「词库项 == 清理后的整句」时才采用，其余一律保留用户原话。
+ *
  * @param {string} input
- * @returns {string} 提取到的岗位名（若未匹配则返回清理后的输入）
+ * @returns {string} 提取到的岗位名（未命中词库则返回清理后的输入）
  */
 export function extractJobName(input) {
   if (!input) return ''
   const raw = input.trim()
 
-  // 1. 优先在原始输入中匹配岗位关键词（按长度从长到短，确保精确匹配）
-  const sorted = [...JOB_KEYWORDS].sort((a, b) => b.length - a.length)
-  for (const kw of sorted) {
-    // 大小写不敏感匹配
-    if (raw.toLowerCase().includes(kw.toLowerCase())) {
-      return kw
-    }
-  }
+  // 1. 先剥掉「我想做 / 的工作」这类包装，剩下的就是用户心里的岗位名
+  const cleaned = stripJobPhrasing(raw)
 
-  // 2. 未匹配则做清理：去掉常见前缀/后缀
-  const cleaned = raw
+  // 2. 词库仅用于大小写/空格的规范化：只有整词等价才替换，
+  //    避免「市场运营」被词库里的「运营」截断。
+  const normalized = normalizeKey(cleaned)
+  const canonical = JOB_KEYWORDS.find(kw => normalizeKey(kw) === normalized)
+  if (canonical) return canonical
+
+  return cleaned || raw
+}
+
+/** 去掉常见的口语前缀/后缀，保留岗位本体 */
+function stripJobPhrasing(raw) {
+  return raw
     .replace(/^(我想|我希望|我打算|想要|想做|希望|我准备|准备|计划|我计划|我要|我会|目标|未来|今后)+/g, '')
     .replace(/^(做|成为|当)+/g, '')
     .replace(/^(一名|一个|个|名)/g, '')
     .replace(/(的工作|工作|的岗位|岗位|方向|的方向)$/g, '')
     .trim()
+}
 
-  return cleaned || raw
+/** 归一化用于比较：忽略大小写与空格，「Java 后端开发」≡「java后端开发」 */
+function normalizeKey(s) {
+  return (s || '').toLowerCase().replace(/\s+/g, '')
 }

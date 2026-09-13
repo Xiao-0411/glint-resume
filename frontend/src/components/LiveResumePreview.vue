@@ -111,28 +111,10 @@
 
             <!-- 技能 -->
             <div v-else-if="key === 'skills'" class="skill-grid">
-              <div class="skill-row">
-                <span class="skill-label">技术栈</span>
+              <div v-for="row in skillRows" :key="row.key" class="skill-row">
+                <span class="skill-label">{{ row.label }}</span>
                 <div class="skill-chips">
-                  <span v-for="s in displayResume.skills.technical" :key="s" class="chip">{{ s }}</span>
-                </div>
-              </div>
-              <div v-if="displayResume.skills.tools.length" class="skill-row">
-                <span class="skill-label">工具</span>
-                <div class="skill-chips">
-                  <span v-for="s in displayResume.skills.tools" :key="s" class="chip">{{ s }}</span>
-                </div>
-              </div>
-              <div class="skill-row">
-                <span class="skill-label">产品能力</span>
-                <div class="skill-chips">
-                  <span v-for="s in displayResume.skills.product" :key="s" class="chip">{{ s }}</span>
-                </div>
-              </div>
-              <div class="skill-row">
-                <span class="skill-label">软技能</span>
-                <div class="skill-chips">
-                  <span v-for="s in displayResume.skills.soft" :key="s" class="chip">{{ s }}</span>
+                  <span v-for="s in row.items" :key="s" class="chip">{{ s }}</span>
                 </div>
               </div>
             </div>
@@ -251,6 +233,20 @@ function mapProfile(p) {
 // 真实模式渲染真实数据;否则(mock 模式)回落到样例排版
 const displayResume = computed(() => hasReal.value ? mapProfile(props.profile) : buildMockResume(props.targetJob))
 const previewLabel = computed(() => hasReal.value ? '实时预览 · 仅展示已确认信息' : '排版预览 · 示例')
+
+// 只渲染有内容的技能分类,避免出现「技术栈」「产品能力」这样的空标签行
+const SKILL_CATEGORIES = [
+  { key: 'technical', label: '技术栈' },
+  { key: 'tools', label: '工具' },
+  { key: 'product', label: '产品能力' },
+  { key: 'soft', label: '软技能' }
+]
+
+const skillRows = computed(() =>
+  SKILL_CATEGORIES
+    .map(c => ({ ...c, items: displayResume.value.skills[c.key] || [] }))
+    .filter(c => c.items.length)
+)
 
 function has(key) {
   return props.completedSections.includes(key)
