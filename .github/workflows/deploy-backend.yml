@@ -83,7 +83,18 @@ jobs:
           .venv/bin/python -m pip install -r requirements.txt
 
           sudo -n systemctl restart "$SERVICE"
-          sleep 2
-          curl --fail --silent --show-error http://127.0.0.1:8000/api/health
+          # Uvicorn needs a few seconds to import the app and run init_db(),
+          # so poll the health endpoint instead of checking it once.
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/api/health; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "Health check failed after ${attempt}s" >&2
+              systemctl status "$SERVICE" --no-pager >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
           printf '\nDeployment complete: %s\n' "$SERVICE"
           REMOTE
