@@ -3,9 +3,10 @@ import unittest
 from unittest.mock import patch
 
 from app.crawlers.base import JOB_KEYWORDS, select_cities, select_keywords
+from app.crawlers.card_parser import is_publishable
 from app.crawlers.cdp_browser import CdpBrowser
 from app.crawlers.liepin import LiepinCrawler
-from app.crawlers.zhaopin import ZhaopinCrawler
+from app.crawlers.zhaopin import NATIONWIDE_CODE, ZhaopinCrawler, wait_for_records, zhaopin_city_code
 
 
 class KeywordSelectionTests(unittest.TestCase):
@@ -34,6 +35,73 @@ class CardMappingTests(unittest.TestCase):
         self.assertEqual(job["company"], "示例科技有限公司")
         self.assertEqual(job["description"], "")
         self.assertEqual(job["requirements"], [])
+
+    def test_zhaopin_vue_record_is_normalized(self):
+        # 2026-09 改版后的结果页：职位数据来自 div.job-card 的 Vue 组件 props
+        job = ZhaopinCrawler()._parse_card({
+            "number": "CC625242220J40886290710",
+            "name": "服务端研发工程师",
+            "salary": "3-6万·16薪",
+            "company": "拼多多",
+            "city": "上海",
+            "district": "长宁",
+            "street": "天山路",
+            "education": "本科",
+            "experience": "经验不限",
+            "url": "http://www.zhaopin.com/jobdetail/CC625242220J40886290710.htm",
+            "skills": ["MySQL", "Spring", "Java"],
+        })
+        self.assertEqual(job["platform_job_id"], "CC625242220J40886290710")
+        self.assertEqual(job["company"], "拼多多")
+        self.assertEqual(job["salary"], "3-6万·16薪")
+        self.assertEqual(job["location"], "上海")
+        self.assertEqual(job["education"], "本科")
+        self.assertEqual(job["experience"], "经验不限")
+        self.assertEqual(job["tags"], ["经验不限", "本科", "MySQL", "Spring", "Java"])
+        self.assertEqual(job["requirements"], ["MySQL", "Spring", "Java"])
+        # 列表数据里的 JD 只是截断摘要，留空交给详情补全
+        self.assertEqual(job["description"], "")
+        self.assertTrue(is_publishable(job, city="上海"))
+
+    def test_zhaopin_dom_fallback_gets_stable_id(self):
+        record = {"number": "", "name": "Java开发工程师", "salary": "4000-8000元", "company": "贵州智政恒达科技有限公司", "district": "贵阳 观山湖 金华园"}
+        first = ZhaopinCrawler()._parse_card(record)
+        second = ZhaopinCrawler()._parse_card(dict(record))
+        self.assertTrue(first["platform_job_id"].startswith("dom-"))
+        self.assertEqual(first["platform_job_id"], second["platform_job_id"])
+        self.assertEqual(first["salary"], "4000-8000元")
+        self.assertEqual(first["location"], "贵阳")
+        self.assertTrue(is_publishable(first, city="贵阳"))
+
+    def test_zhaopin_city_codes(self):
+        self.assertEqual(zhaopin_city_code("上海"), "538")
+        self.assertEqual(zhaopin_city_code("北京"), "530")
+        # 智联对部分城市带"市"后缀、对自治州用短名
+        self.assertEqual(zhaopin_city_code("吉林"), zhaopin_city_code("吉林市"))
+        self.assertEqual(zhaopin_city_code("阿坝藏族羌族自治州"), zhaopin_city_code("阿坝"))
+        self.assertEqual(zhaopin_city_code("大兴安岭地区"), zhaopin_city_code("大兴安岭"))
+        self.assertEqual(zhaopin_city_code("东沙群岛"), NATIONWIDE_CODE)
+        self.assertEqual(zhaopin_city_code(""), NATIONWIDE_CODE)
+
+    def test_zhaopin_waits_for_vue_hydration_before_accepting_dom_records(self):
+        dom_only = {"hasPanel": True, "isEmpty": False, "records": [{"number": "", "name": "Java开发"}]}
+        hydrated = {"hasPanel": True, "isEmpty": False, "records": [{"number": "CC1", "name": "Java开发"}]}
+
+        class FakeBrowser:
+            def __init__(self, answers):
+                self.answers = list(answers)
+
+            def evaluate(self, _script, _session_id):
+                return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+
+        with patch("app.crawlers.zhaopin.time.sleep"):
+            result = wait_for_records(FakeBrowser([dom_only, dom_only, hydrated]), "sid", timeout=15.0)
+            self.assertEqual(result["records"][0]["number"], "CC1")
+            # 一直拿不到组件数据时，宽限期过后接受 DOM 退化结果
+            fallback = wait_for_records(FakeBrowser([dom_only]), "sid", timeout=15.0, hydration_grace=0.0)
+            self.assertEqual(fallback["records"][0]["number"], "")
+            empty = wait_for_records(FakeBrowser([{"hasPanel": False, "isEmpty": True, "records": []}]), "sid")
+            self.assertTrue(empty["isEmpty"])
 
     def test_liepin_card_is_normalized(self):
         job = LiepinCrawler()._parse_card({

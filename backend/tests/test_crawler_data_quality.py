@@ -62,6 +62,9 @@ def test_card_parser_extracts_real_fields():
     text = "后端开发工程师 【 北京-海淀区 】 10-12k 经验不限 统招本科 北京擎靖天启科技服务有限公司 何女士·经理"
     assert parse_company(text, "后端开发工程师") == "北京擎靖天启科技服务有限公司"
     assert parse_salary(text) == "10-12k"
+    # 智联卡片的两种写法：不带"/月"的元薪资、带年薪倍数的万薪资
+    assert parse_salary("Java开发工程师 4000-8000元 大专") == "4000-8000元"
+    assert parse_salary("服务端研发 3-6万·16薪 本科") == "3-6万·16薪"
     assert parse_education(text) == "本科"
     assert parse_experience(text) == "经验不限"
 

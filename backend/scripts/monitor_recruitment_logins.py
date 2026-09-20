@@ -12,7 +12,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app.crawlers.cdp_browser import CdpBrowser, boss_login_status, extract_cards, page_status
 from app.crawlers.liepin import SELECTORS as LIEPIN_SELECTORS
-from app.crawlers.zhaopin import SELECTORS as ZHAOPIN_SELECTORS
+from app.crawlers.zhaopin import count_visible_jobs as count_zhaopin_jobs
 
 
 PLATFORMS = {
@@ -24,8 +24,9 @@ PLATFORMS = {
     },
     "zhaopin": {
         "label": "Zhaopin",
-        "url": "https://www.zhaopin.com/sou/?kw=Java",
-        "selectors": ZHAOPIN_SELECTORS,
+        # 改版后的结果页是 Vue 应用，卡片上没有详情链接，职位数由爬虫模块按组件数据统计
+        "url": "https://www.zhaopin.com/jobs?jl=538&kw=Java",
+        "count_jobs": lambda browser, session_id: count_zhaopin_jobs(browser, session_id),
         "login_hosts": ["passport.zhaopin.com"],
     },
     "liepin": {
@@ -55,11 +56,15 @@ def _is_ready(browser: CdpBrowser, session_id: str, config: dict) -> tuple[bool,
     marker = next((item for item in blocked_markers if item.lower() in text.lower()), "")
     if marker:
         return False, f"verification or access restriction detected ({marker}; url={url})"
-    cards = extract_cards(browser, session_id, config["selectors"])
-    if not cards:
+    counter = config.get("count_jobs")
+    if counter is not None:
+        visible = counter(browser, session_id)
+    else:
+        visible = len(extract_cards(browser, session_id, config["selectors"]))
+    if not visible:
         page = title or url or "unknown page"
         return False, f"no job list yet (page={page[:100]})"
-    return True, f"ready ({len(cards)} jobs visible)"
+    return True, f"ready ({visible} jobs visible)"
 
 
 def _format_states(states: dict[str, tuple[bool, str]]) -> str:
